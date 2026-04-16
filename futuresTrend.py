@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import time
 
-# 1. 资产配置：新增美国国债模块
+# 1. 资产配置
 ASSETS = {
     "美国国债 (Treasury)": {
         "^IRX": "13周国债收益率", "^FVX": "5年期国债收益率", "^TNX": "10年期国债收益率", 
@@ -33,30 +32,26 @@ ASSETS = {
 
 TICKER_TO_NAME = {ticker: name for cat in ASSETS.values() for ticker, name in cat.items()}
 
+# 设置页面布局：虽然是 wide，但 st.columns 会处理手机适配
 st.set_page_config(page_title="全球市场实时监控看板", layout="wide")
 
 # --- 侧边栏控制 ---
 with st.sidebar:
     st.header("系统设置")
     auto_refresh = st.checkbox("开启自动刷新 (60秒)", value=True)
-    st.info("提示：国债收益率(^开头)显示的是百分比点数")
+    st.info("提示：手机端查看时，图表会自动垂直排列。")
 
 # --- 数据抓取与逻辑 ---
+@st.cache_data(ttl=600)
 def fetch_and_analyze():
     tickers = list(TICKER_TO_NAME.keys())
-    
     # 抓取历史数据
     df_hist = yf.download(tickers, period="1y", progress=False)
-    close_data = df_hist['Close'] if isinstance(df_hist.columns, pd.MultiIndex) else df_hist[['Close']]
-    
+    close_data = df_hist['Close'].ffill().bfill()
     # 抓取实时分钟数据
     df_recent = yf.download(tickers, period="1d", interval="1m", progress=False)['Close']
-    
-    # 填充空值
-    close_data = close_data.ffill().bfill()
     df_recent = df_recent.ffill()
 
-    # 计算北京时间
     beijing_now = datetime.utcnow() + timedelta(hours=8)
     bj_now_str = beijing_now.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -65,101 +60,83 @@ def fetch_and_analyze():
     
     summary_list = []
     for ticker in tickers:
-        d_r, p_r = daily_rets[ticker], past_5d_rets[ticker]
+        d_r = daily_rets[ticker]
+        p_r = past_5d_rets[ticker]
         last_price = df_recent[ticker].iloc[-1]
-        
-        # 转换行情时间
         raw_time = df_recent.index[-1]
         bj_data_time = (raw_time + timedelta(hours=8)).strftime('%H:%M:%S')
 
-        # 状态描述逻辑 (针对国债做了优化)
-        if d_r > 0.0001 and p_r < -0.0001: status = "⭐ 趋势反转 (向上)"
-        elif d_r < -0.0001 and p_r > 0.0001: status = "⚠️ 趋势反转 (向下)"
+        if d_r > 0 and p_r < 0: status = "⭐ 跌转涨"
+        elif d_r < 0 and p_r > 0: status = "⚠️ 涨转跌"
         elif abs(d_r) > 0.02: status = "⚡ 剧烈波动"
         else: status = "📈 维持涨势" if d_r > 0 else "📉 维持跌势"
         
         summary_list.append({
-            "代号": ticker,
-            "资产名称": TICKER_TO_NAME[ticker],
-            "最新价/收益点": last_price,
-            "昨日涨跌": d_r,
-            "前5日累计": p_r,
-            "状态分析": status,
-            "行情时间": bj_data_time
+            "代号": ticker, "资产名称": TICKER_TO_NAME[ticker],
+            "最新价": last_price, "昨日涨跌": d_r,
+            "前5日累计": p_r, "状态分析": status, "时间": bj_data_time
         })
-    
     return close_data, pd.DataFrame(summary_list), bj_now_str
 
-# --- 页面 UI 部分 ---
-st.title("🛡️ 全球资产 & 美国国债监控看板")
+# --- UI 展示部分 ---
+st.title("🛡️ 全球资产实时监控 (移动适配版)")
 
 try:
     close_data, summary_df, update_time = fetch_and_analyze()
+    st.write(f"**同步时间 (北京):** `{update_time}`")
 
-    st.markdown(f"**系统同步时间 (北京):** `{update_time}` | 红色点=价格/收益率异常 | 黄色叉=波动异常")
-
-    # 1. 总结表格
-    st.subheader("📋 跨市场行情快报")
-    selected_cat = st.selectbox("筛选板块：", ["全部显示"] + list(ASSETS.keys()))
-    
-    display_df = summary_df
-    if selected_cat != "全部显示":
-        target_tickers = list(ASSETS[selected_cat].keys())
-        display_df = summary_df[summary_df['代号'].isin(target_tickers)]
-
-    def color_surprises(val):
-        if isinstance(val, float):
-            return 'color: #00ff00' if val > 0 else 'color: #ff4b4b'
-        return ''
-
+    # 1. 总结表格（Streamlit 表格在手机上支持横向滚动）
     st.dataframe(
-        display_df.style.format({
-            "最新价/收益点": "{:.2f}",
-            "昨日涨跌": "{:.2%}",
-            "前5日累计": "{:.2%}"
-        }).map(color_surprises, subset=["昨日涨跌", "前5日累计"]),
-        width="stretch", 
-        height="content",
-        hide_index=True
+        summary_df.style.format({"最新价": "{:.2f}", "昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
+        .map(lambda x: 'color: #00ff00' if isinstance(x, float) and x > 0 else 'color: #ff4b4b' if isinstance(x, float) and x < 0 else '', 
+             subset=["昨日涨跌", "前5日累计"]),
+        width="stretch", height=400, hide_index=True
     )
 
-    # 2. 详细趋势图
+    # 2. 分类图表展示 (核心修改点：使用 st.columns)
     st.divider()
     tabs = st.tabs(list(ASSETS.keys()))
     
     for tab, (cat_name, cat_tickers) in zip(tabs, ASSETS.items()):
         with tab:
+            # 创建 4 列容器。电脑端会并排，手机端会自动变成 1 列。
+            cols = st.columns(4) 
             valid_tickers = [t for t in cat_tickers.keys() if t in close_data.columns]
-            cols_per_row = 4
-            rows = (len(valid_tickers) + cols_per_row - 1) // cols_per_row
             
-            fig = make_subplots(
-                rows=rows, cols=cols_per_row,
-                subplot_titles=[f"<b>{t}</b><br>{cat_tickers[t]}" for t in valid_tickers],
-                vertical_spacing=0.1, horizontal_spacing=0.04
-            )
-
             for i, ticker in enumerate(valid_tickers):
-                row, col = (i // cols_per_row) + 1, (i % cols_per_row) + 1
-                data = close_data[ticker].dropna()
-                
-                # 异常检测逻辑
-                z = (data - data.rolling(20).mean()) / data.rolling(20).std()
-                p_out = data[np.abs(z) > 2.5]
-                rets = data.pct_change()
-                iqr = rets.quantile(0.75) - rets.quantile(0.25)
-                v_out = data.loc[rets[(rets > rets.quantile(0.75) + 1.5*iqr) | (rets < rets.quantile(0.25) - 1.5*iqr)].index]
+                # 轮流放入 4 个列容器中
+                with cols[i % 4]:
+                    data = close_data[ticker].dropna()
+                    
+                    # 异常检测
+                    z = (data - data.rolling(20).mean()) / data.rolling(20).std()
+                    p_out = data[np.abs(z) > 2.5]
+                    rets = data.pct_change()
+                    iqr = rets.quantile(0.75) - rets.quantile(0.25)
+                    v_out = data.loc[rets[(rets > rets.quantile(0.75) + 1.5*iqr) | 
+                                          (rets < rets.quantile(0.25) - 1.5*iqr)].index]
 
-                fig.add_trace(go.Scatter(x=data.index, y=data.values, name=ticker, line=dict(color='#00d4ff', width=1.5), showlegend=False), row=row, col=col)
-                if not p_out.empty:
-                    fig.add_trace(go.Scatter(x=p_out.index, y=p_out.values, mode='markers', marker=dict(color='red', size=4), showlegend=False), row=row, col=col)
-                if not v_out.empty:
-                    fig.add_trace(go.Scatter(x=v_out.index, y=v_out.values, mode='markers', marker=dict(color='yellow', symbol='x', size=4), showlegend=False), row=row, col=col)
+                    # 为每个 ETF 创建独立的精简版图表
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5)))
+                    
+                    if not p_out.empty:
+                        fig.add_trace(go.Scatter(x=p_out.index, y=p_out.values, mode='markers', marker=dict(color='red', size=6)))
+                    if not v_out.empty:
+                        fig.add_trace(go.Scatter(x=v_out.index, y=v_out.values, mode='markers', marker=dict(color='yellow', symbol='x', size=6)))
 
-            fig.update_layout(height=280 * rows, template="plotly_dark", margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, width="stretch", config={'responsive': True})
+                    fig.update_layout(
+                        title=dict(text=f"<b>{ticker}</b><br>{cat_tickers[ticker]}", font=dict(size=14)),
+                        height=250, # 减小单个图表高度，适合手机滑动
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        template="plotly_dark",
+                        showlegend=False,
+                        xaxis=dict(showgrid=False, tickfont=dict(size=8)),
+                        yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)', tickfont=dict(size=8))
+                    )
+                    
+                    st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
 
-    # 自动刷新
     if auto_refresh:
         time.sleep(60)
         st.rerun()
