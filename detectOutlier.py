@@ -16,11 +16,15 @@ ETF_DETAILS = {
 }
 
 # --- 数据抓取与逻辑 ---
-@st.cache_data(ttl=3600) # 缓存数据一小时，避免重复抓取
+@st.cache_data(ttl=3600) # 缓存数据一小时
 def fetch_and_analyze():
     tickers = list(ETF_DETAILS.keys())
-    df = yf.download(tickers, period="1y")
+    # 使用 progress=False 保持日志干净
+    df = yf.download(tickers, period="1y", progress=False)
     close_data = df['Close'] if isinstance(df.columns, pd.MultiIndex) else df[['Close']]
+    
+    # 填充空值防止计算报错
+    close_data = close_data.ffill().bfill()
     
     daily_rets = (close_data.iloc[-1] / close_data.iloc[-2]) - 1
     past_5d_rets = (close_data.iloc[-2] / close_data.iloc[-7]) - 1
@@ -28,11 +32,13 @@ def fetch_and_analyze():
     summary_list = []
     for ticker in tickers:
         d_r, p_r = daily_rets[ticker], past_5d_rets[ticker]
-        status = "延续趋势"
+        
+        # 状态描述逻辑更新
         if d_r > 0 and p_r < 0: status = "⭐ 由跌转涨"
         elif d_r < 0 and p_r > 0: status = "⚠️ 涨势熄火"
         elif d_r > 0.01 and p_r > 0.02: status = "🔥 强势连涨"
         elif d_r < -0.01 and p_r < -0.02: status = "❄️ 跌势加剧"
+        else: status = "📈 维持涨势" if d_r > 0 else "📉 维持跌势"
         
         summary_list.append({
             "代号": ticker,
@@ -45,28 +51,29 @@ def fetch_and_analyze():
     return close_data, pd.DataFrame(summary_list)
 
 # --- 页面 UI 部分 ---
-st.title("📊 ETF 市场趋势监控实时看板")
-st.markdown(f"**数据截至日期:** `{pd.Timestamp.now().strftime('%Y-%m-%d')}` | 提示：红点=价格极端，黄叉=波动极端")
+st.title("📊 ETF 市场趋势监控看板")
+st.markdown(f"**数据截至日期:** `{pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}` | 提示：红点=价格极端，黄叉=波动极端")
 
 try:
     close_data, summary_df = fetch_and_analyze()
 
-    # 2. 显示总结表格 (美化对齐版)
+    # 2. 显示总结表格 (修复了 .map 报错问题)
     st.subheader("🚀 市场角色切换与涨跌对比总结")
     
-    # 格式化表格显示颜色
     def color_surprises(val):
         if isinstance(val, float):
-            color = '#ff4b4b' if val < 0 else '#00ff00' # 绿涨红跌 (国际标准)，若需国内标准可调换颜色
+            # 采用直观颜色：涨红跌绿
+            color = '#ff4b4b' if val < 0 else '#00ff00'
             return f'color: {color}'
         return ''
 
+    # 注意这里：.applymap 已改为 .map
     st.dataframe(
         summary_df.style.format({
             "昨日涨跌": "{:.2%}",
             "前5日累计": "{:.2%}"
-        }).applymap(color_surprises, subset=["昨日涨跌", "前5日累计"]),
-        use_container_width=True,
+        }).map(color_surprises, subset=["昨日涨跌", "前5日累计"]),
+        width="stretch", 
         height=400
     )
 
@@ -80,8 +87,8 @@ try:
     
     fig = make_subplots(
         rows=rows, cols=cols_per_row,
-        subplot_titles=[f"{t} ({ETF_DETAILS[t]})" for t in tickers],
-        vertical_spacing=0.05,
+        subplot_titles=[f"<b>{t}</b><br>{ETF_DETAILS[t]}" for t in tickers],
+        vertical_spacing=0.06,
         horizontal_spacing=0.03
     )
 
@@ -93,22 +100,20 @@ try:
         z = (data - data.rolling(20).mean()) / data.rolling(20).std()
         p_out = data[np.abs(z) > 2.5]
         rets = data.pct_change()
-        q1, q3 = rets.quantile(0.25), rets.quantile(0.75)
-        iqr = q3 - q1
-        v_out = data.loc[rets[(rets > q3 + 1.5*iqr) | (rets < q1 - 1.5*iqr)].index]
+        iqr = rets.quantile(0.75) - rets.quantile(0.25)
+        v_out = data.loc[rets[(rets > rets.quantile(0.75) + 1.5*iqr) | (rets < rets.quantile(0.25) - 1.5*iqr)].index]
 
-        # 绘图
-        fig.add_trace(go.Scatter(x=data.index, y=data.values, name=ticker, line=dict(color='#00d4ff', width=1.5), showlegend=False), row=row, col=col)
+        # 绘线
+        fig.add_trace(go.Scatter(x=data.index, y=data.values, name=ticker, line=dict(color='#00d4ff', width=1.2), showlegend=False), row=row, col=col)
         
         if not p_out.empty:
-            fig.add_trace(go.Scatter(x=p_out.index, y=p_out.values, mode='markers', marker=dict(color='red', size=5), showlegend=False, name="价格异常"), row=row, col=col)
+            fig.add_trace(go.Scatter(x=p_out.index, y=p_out.values, mode='markers', marker=dict(color='red', size=4), showlegend=False, name="价格异常"), row=row, col=col)
         if not v_out.empty:
-            fig.add_trace(go.Scatter(x=v_out.index, y=v_out.values, mode='markers', marker=dict(color='yellow', symbol='x', size=5), showlegend=False, name="波动异常"), row=row, col=col)
+            fig.add_trace(go.Scatter(x=v_out.index, y=v_out.values, mode='markers', marker=dict(color='yellow', symbol='x', size=4), showlegend=False, name="波动异常"), row=row, col=col)
 
-    fig.update_layout(height=1200, template="plotly_dark", margin=dict(l=10, r=10, t=50, b=10))
-    fig.update_xaxes(showticklabels=True, tickfont=dict(size=8))
-    
-    st.plotly_chart(fig, use_container_width=True)
+    # 适配最新 width 语法
+    fig.update_layout(height=1200, template="plotly_dark", margin=dict(l=10, r=10, t=60, b=10))
+    st.plotly_chart(fig, width="stretch", config={'responsive': True})
 
 except Exception as e:
     st.error(f"分析出错: {e}")
