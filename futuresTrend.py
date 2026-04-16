@@ -101,7 +101,7 @@ try:
         display_df.style.format({"昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
         .map(color_style, subset=["昨日涨跌", "前5日累计"]),
         width="stretch", 
-        height=none,
+        height=None,
         hide_index=True  # 隐藏左侧索引，更规整
     )
 
