@@ -4,9 +4,8 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
 
-# 资产配置保持不变
+# 1. 资产配置
 ASSETS = {
     "能源板块 (Energy)": {
         "USO": "WTI原油ETF", "BNO": "布伦特原油ETF", "NG=F": "天然气主力", 
@@ -32,34 +31,32 @@ TICKER_TO_NAME = {ticker: name for cat in ASSETS.values() for ticker, name in ca
 
 st.set_page_config(page_title="全球商品监控看板", layout="wide")
 
-@st.cache_data(ttl=300) # 缩短缓存时间到5分钟，保证行情刷新
+@st.cache_data(ttl=300) # 5分钟刷新一次数据
 def fetch_realtime_data():
     all_tickers = list(TICKER_TO_NAME.keys())
     
-    # 1. 抓取历史数据（用于 Z-Score 和 5日累计）
+    # A. 抓取历史数据（用于 Z-Score 和 5日累计）
     df_hist = yf.download(all_tickers, period="1y", interval="1d", progress=False)
     close_data = df_hist['Close'].ffill().bfill()
 
-    # 2. 核心补救逻辑：单独抓取最近 2 天的分钟级数据，强制获取“此时此刻”的真实价格
-    # 这能解决 Yahoo 历史数据更新慢导致 0.00% 的问题
-    print("正在校准实时价格...")
+    # B. 核心校准：抓取最近 2 天的分钟级数据，获取真正的最新成交价
+    # 解决 Yahoo 历史数据更新延迟导致的 0.00% 报错
     df_recent = yf.download(all_tickers, period="2d", interval="15m", progress=False)['Close']
     df_recent = df_recent.ffill()
 
     summary = []
     
     for ticker in all_tickers:
-        # 获取历史序列
-        hist_series = close_data[ticker].dropna()
+        if ticker not in close_data.columns: continue
         
-        # 获取最新真实成交价
+        # 获取最新实时成交价
         last_price = df_recent[ticker].iloc[-1]
-        # 获取昨日收盘价
+        # 获取昨天正式收盘价
         prev_close = close_data[ticker].iloc[-2]
-        # 获取 6 天前的价格（用于计算前5日累计）
+        # 获取 6 天前的价格（用于计算前 5 日累计）
         base_5d_price = close_data[ticker].iloc[-7]
 
-        # 重新计算涨跌幅 (不再依赖历史表的最后一行)
+        # 重新计算涨跌幅
         d_r = (last_price / prev_close) - 1
         p_r = (prev_close / base_5d_price) - 1
         
@@ -75,41 +72,111 @@ def fetch_realtime_data():
         summary.append({
             "代号": ticker,
             "资产名称": TICKER_TO_NAME[ticker],
+            "最新价": last_price,
             "昨日涨跌": d_r,
             "前5日累计": p_r,
-            "状态分析": status,
-            "最新价": last_price
+            "状态分析": status
         })
             
     return close_data, pd.DataFrame(summary)
 
-st.title("🛡️ 全球商品市场监控看板 (行情校准版)")
+# --- UI 展示主程序 ---
+st.title("🛡️ 全球商品市场监控看板 (行情校准+全屏版)")
 
 try:
     close_data, summary_df = fetch_realtime_data()
 
-    st.subheader("📋 行情总结与实时查询")
+    # 1. 总结表格区域
+    st.subheader("📋 实时行情汇总")
     
-    # 渲染带颜色的表格
+    selected_cat = st.selectbox("筛选板块：", ["全部显示"] + list(ASSETS.keys()))
+    
+    display_df = summary_df
+    if selected_cat != "全部显示":
+        target_tickers = list(ASSETS[selected_cat].keys())
+        display_df = summary_df[summary_df['代号'].isin(target_tickers)]
+
     def color_style(val):
         if isinstance(val, float):
             return 'color: #00ff00' if val > 0.0001 else 'color: #ff4b4b' if val < -0.0001 else 'color: #888888'
         return ''
 
     st.dataframe(
-        summary_df.style.format({
+        display_df.style.format({
             "昨日涨跌": "{:.2%}", 
             "前5日累计": "{:.2%}",
             "最新价": "{:.2f}"
         }).map(color_style, subset=["昨日涨跌", "前5日累计"]),
         width="stretch", 
-        height="content",
+        height="content", # 满屏平铺，无内部滚动条
         hide_index=True 
     )
 
-    # 趋势图部分保持不变...
+    # 2. 详细趋势图区域（这次绝对不漏了！）
     st.divider()
-    # (此处省略之前的绘图代码，保持一致即可)
+    st.subheader("📉 详细走势与异常检测")
+    
+    tabs = st.tabs(list(ASSETS.keys()))
+    for tab, (cat_name, cat_tickers) in zip(tabs, ASSETS.items()):
+        with tab:
+            valid_tickers = [t for t in cat_tickers.keys() if t in close_data.columns]
+            if not valid_tickers:
+                st.write("暂无数据")
+                continue
+                
+            cols_per_row = 4
+            rows = (len(valid_tickers) + cols_per_row - 1) // cols_per_row
+            
+            # 创建绘图网格
+            fig = make_subplots(
+                rows=rows, cols=cols_per_row,
+                subplot_titles=[f"<b>{t}</b><br>{cat_tickers[t]}" for t in valid_tickers],
+                vertical_spacing=0.1, 
+                horizontal_spacing=0.04
+            )
+
+            for i, ticker in enumerate(valid_tickers):
+                row, col = (i // cols_per_row) + 1, (i % cols_per_row) + 1
+                data = close_data[ticker].dropna()
+                
+                # 异常检测逻辑
+                z = (data - data.rolling(20).mean()) / data.rolling(20).std()
+                p_out = data[np.abs(z) > 2.5]
+                rets = data.pct_change()
+                iqr = rets.quantile(0.75) - rets.quantile(0.25)
+                v_out = data.loc[rets[(rets > rets.quantile(0.75) + 1.5*iqr) | (rets < rets.quantile(0.25) - 1.5*iqr)].index]
+
+                # 绘制主价格线
+                fig.add_trace(
+                    go.Scatter(x=data.index, y=data.values, name=ticker, 
+                               line=dict(color='#00d4ff', width=1.2), showlegend=False),
+                    row=row, col=col
+                )
+                
+                # 绘制红点（价格异常）
+                if not p_out.empty:
+                    fig.add_trace(
+                        go.Scatter(x=p_out.index, y=p_out.values, mode='markers', 
+                                   marker=dict(color='red', size=4), showlegend=False),
+                        row=row, col=col
+                    )
+                
+                # 绘制黄叉（波动异常）
+                if not v_out.empty:
+                    fig.add_trace(
+                        go.Scatter(x=v_out.index, y=v_out.values, mode='markers', 
+                                   marker=dict(color='yellow', symbol='x', size=4), showlegend=False),
+                        row=row, col=col
+                    )
+
+            # 图表布局优化
+            fig.update_layout(
+                height=280 * rows, 
+                template="plotly_dark", 
+                margin=dict(l=10, r=10, t=50, b=10)
+            )
+            # 2026 最新适配语法
+            st.plotly_chart(fig, width="stretch", config={'responsive': True})
 
 except Exception as e:
-    st.error(f"发生错误: {e}")
+    st.error(f"分析出错: {e}")
