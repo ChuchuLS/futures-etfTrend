@@ -4,8 +4,13 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
+
+
+# ...
+# 获取本地北京时间 (UTC+8)
+current_time_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%H:%M:%S')
 
 # 1. 资产配置
 ASSETS = {
