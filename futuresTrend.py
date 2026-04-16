@@ -79,7 +79,7 @@ def fetch_and_analyze():
     return close_data, pd.DataFrame(summary_list), bj_now_str
 
 # --- UI 展示部分 ---
-st.title("🛡️ 全球资产实时监控 (移动适配版)")
+st.title("🛡️ 全球资产实时监控")
 
 try:
     close_data, summary_df, update_time = fetch_and_analyze()
