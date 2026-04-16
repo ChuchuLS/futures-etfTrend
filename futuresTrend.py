@@ -5,7 +5,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 1. 资产配置：替换了失效的 NI=F，改用更稳定的行业 ETF (PICK)
+# 1. 资产配置
 ASSETS = {
     "能源板块 (Energy)": {
         "USO": "WTI原油ETF", "BNO": "布伦特原油ETF", "NG=F": "天然气主力", 
@@ -29,12 +29,12 @@ ASSETS = {
 
 TICKER_TO_NAME = {ticker: name for cat in ASSETS.values() for ticker, name in cat.items()}
 
-st.set_page_config(page_title="全球商品市场监控", layout="wide")
+st.set_page_config(page_title="全球商品监控看板", layout="wide")
 
 @st.cache_data(ttl=1800)
 def fetch_data():
     all_tickers = list(TICKER_TO_NAME.keys())
-    # 下载数据，不显示下载进度条以保持界面整洁
+    # 强制下载更长一点的数据，确保 ffill 有足够参考值
     df = yf.download(all_tickers, period="1y", threads=False, progress=False)
     
     if isinstance(df.columns, pd.MultiIndex):
@@ -42,38 +42,31 @@ def fetch_data():
     else:
         close_data = df[['Close']]
     
-    # 使用最新的填充语法
-    close_data = close_data.ffill().bfill()
+    # --- 强力补洞逻辑 ---
+    # 先向前填充（拿昨天补今天），再向后填充（拿明天补昨天），最后补0
+    close_data = close_data.ffill().bfill().fillna(0)
     
     daily_rets = (close_data.iloc[-1] / close_data.iloc[-2]) - 1
     past_5d_rets = (close_data.iloc[-2] / close_data.iloc[-7]) - 1
     
     summary = []
-    # 仅处理成功获取到数据的代号
     available_tickers = [t for t in all_tickers if t in close_data.columns]
     
     for ticker in available_tickers:
         d_r, p_r = daily_rets[ticker], past_5d_rets[ticker]
         
-        # 状态分析：明确显示 涨/跌
-        if d_r > 0 and p_r < 0: 
-            status = "⭐ 跌转涨 (反弹)"
-        elif d_r < 0 and p_r > 0: 
-            status = "⚠️ 涨转跌 (回调)"
-        elif d_r > 0.01 and p_r > 0.02: 
-            status = "🔥 加速上涨"
-        elif d_r < -0.01 and p_r < -0.02: 
-            status = "❄️ 加速下跌"
-        elif d_r > 0: 
-            status = "📈 维持上涨趋势"
-        elif d_r < 0: 
-            status = "📉 维持下跌趋势"
-        else: 
-            status = "➖ 横盘震荡"
+        # 状态分析
+        if d_r > 0 and p_r < 0: status = "⭐ 跌转涨 (反弹)"
+        elif d_r < 0 and p_r > 0: status = "⚠️ 涨转跌 (回调)"
+        elif d_r > 0.01 and p_r > 0.02: status = "🔥 加速上涨"
+        elif d_r < -0.01 and p_r < -0.02: status = "❄️ 加速下跌"
+        elif d_r > 0: status = "📈 维持上扬"
+        elif d_r < 0: status = "📉 维持走弱"
+        else: status = "➖ 横盘震荡"
         
         summary.append({
             "代号": ticker,
-            "资产全称": TICKER_TO_NAME[ticker],
+            "资产名称": TICKER_TO_NAME[ticker],
             "昨日涨跌": d_r,
             "前5日累计": p_r,
             "状态分析": status
@@ -81,45 +74,43 @@ def fetch_data():
             
     return close_data, pd.DataFrame(summary)
 
-# --- UI 展示 ---
 st.title("🛡️ 全球商品市场监控看板")
 
 try:
     close_data, summary_df = fetch_data()
 
-    # 1. 总结表格 - 适配最新 width 语法
-    st.subheader("📋 行情总结与趋势分析")
-    selected_cat = st.selectbox("筛选板块：", ["全部显示"] + list(ASSETS.keys()))
+    # 1. 总结表格区域
+    st.subheader("📋 行情总结与实时查询")
+    
+    # 如果你想查询“所有”，只需在下拉框选“全部显示”
+    selected_cat = st.selectbox("选择分类 (全屏状态下可点击右侧搜索图标查询)：", ["全部显示"] + list(ASSETS.keys()))
     
     display_df = summary_df
     if selected_cat != "全部显示":
         target_tickers = list(ASSETS[selected_cat].keys())
         display_df = summary_df[summary_df['代号'].isin(target_tickers)]
 
+    # 渲染颜色
     def color_style(val):
         if isinstance(val, float):
             return 'color: #00ff00' if val > 0 else 'color: #ff4b4b'
         return ''
 
-    # 修复：将 use_container_width=True 替换为 width="stretch"
+    # --- 这里是查询功能的关键 ---
     st.dataframe(
         display_df.style.format({"昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
         .map(color_style, subset=["昨日涨跌", "前5日累计"]),
         width="stretch", 
-        height=450
+        height=500,
+        hide_index=True  # 隐藏左侧索引，更规整
     )
 
-    # 2. 趋势图
+    # 2. 详细趋势图
     st.divider()
     tabs = st.tabs(list(ASSETS.keys()))
     for tab, (cat_name, cat_tickers) in zip(tabs, ASSETS.items()):
         with tab:
-            # 过滤掉下载失败的代号
             valid_tickers = [t for t in cat_tickers.keys() if t in close_data.columns]
-            if not valid_tickers:
-                st.warning("该板块暂无有效数据")
-                continue
-                
             cols_per_row = 4
             rows = (len(valid_tickers) + cols_per_row - 1) // cols_per_row
             fig = make_subplots(rows=rows, cols=cols_per_row, subplot_titles=[f"{t}\n{cat_tickers[t]}" for t in valid_tickers],
@@ -128,8 +119,6 @@ try:
             for i, ticker in enumerate(valid_tickers):
                 row, col = (i // cols_per_row) + 1, (i % cols_per_row) + 1
                 data = close_data[ticker].dropna()
-                
-                # 异常检测
                 z = (data - data.rolling(20).mean()) / data.rolling(20).std()
                 p_out = data[np.abs(z) > 2.5]
                 rets = data.pct_change()
@@ -142,9 +131,8 @@ try:
                 if not v_out.empty:
                     fig.add_trace(go.Scatter(x=v_out.index, y=v_out.values, mode='markers', marker=dict(color='yellow', symbol='x', size=4), showlegend=False), row=row, col=col)
 
-            # 修复：将 use_container_width=True 替换为 width="stretch"
             fig.update_layout(height=280 * rows, template="plotly_dark", margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, theme="streamlit", config={'responsive': True})
+            st.plotly_chart(fig, width="stretch", config={'responsive': True})
 
 except Exception as e:
     st.error(f"发生错误: {e}")
