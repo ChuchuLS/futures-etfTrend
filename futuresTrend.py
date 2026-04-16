@@ -101,8 +101,8 @@ try:
         display_df.style.format({"昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
         .map(color_style, subset=["昨日涨跌", "前5日累计"]),
         width="stretch", 
-        height=None,
-        hide_index=True  # 隐藏左侧索引，更规整
+        height=None,    # 设置为 None，表格就会根据合约数量自动撑开，不再有内部小滚动条
+        hide_index=True 
     )
 
     # 2. 详细趋势图
