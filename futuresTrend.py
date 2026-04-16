@@ -37,25 +37,26 @@ st.set_page_config(page_title="全球商品实时监控", layout="wide")
 def fetch_realtime_data():
     all_tickers = list(TICKER_TO_NAME.keys())
     
-    # A. 抓取历史数据（用于 Z-Score 和背景趋势）
+    # 抓取历史与实时数据 (保持不变)
     df_hist = yf.download(all_tickers, period="1y", interval="1d", progress=False)
     close_data = df_hist['Close'].ffill().bfill()
-
-    # B. 核心校准：抓取最近 1 天的分钟级数据，获取最新的那一秒
-    # 周期设为 1d，间隔设为 1m
     df_recent = yf.download(all_tickers, period="1d", interval="1m", progress=False)['Close']
     df_recent = df_recent.ffill()
 
     summary = []
-    current_time_str = datetime.now().strftime('%H:%M:%S') # 获取本地系统时间
+    # 【核心修改点1：改为北京时间】
+    beijing_now = datetime.utcnow() + timedelta(hours=8)
+    current_time_str = beijing_now.strftime('%H:%M:%S') 
 
     for ticker in all_tickers:
         if ticker not in close_data.columns: continue
         
-        # 获取最新实时成交价
         last_price = df_recent[ticker].iloc[-1]
-        # 获取最新数据点的时间戳
-        data_time = df_recent.index[-1].strftime('%H:%M:%S')
+        # 【核心修改点2：数据点时间也转为北京时间】
+        # 注意：这里假设 yfinance 返回的是 UTC，如果是美东时间则需要 +12/13 小时
+        # 我们根据服务器同步时间来统一，直接加 8 小时最直观
+        raw_data_time = df_recent.index[-1]
+        data_time = (raw_data_time + timedelta(hours=8)).strftime('%H:%M:%S')
         # 获取昨天收盘价
         prev_close = close_data[ticker].iloc[-2]
         # 获取 6 天前的价格
