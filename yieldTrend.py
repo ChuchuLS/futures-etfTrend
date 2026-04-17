@@ -96,7 +96,7 @@ try:
 
     # --- TAB 1: 全市场汇总 ---
     with tabs[0]:
-        st.subheader("🚀 全资产排行榜 ( 600px 高度)")
+        st.subheader("🚀 全资产排行榜")
         render_styled_table(df_summary, height=600)
 
     # --- TAB 2: 板块 ETF ---
