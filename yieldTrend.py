@@ -21,7 +21,6 @@ COMMODITIES = {
     "农产品": {"SOYB": "大豆", "CORN": "玉米", "WEAT": "小麦", "SB=F": "原糖", "KC=F": "咖啡"}
 }
 
-# 使用各国最活跃的本币国债 ETF (解决 None 问题)
 BONDS = {
     "美国 (USA)": {"SHY": ("1-3Y短债", "2Y"), "IEF": ("7-10Y中债", "10Y"), "TLT": ("20Y+长债", "30Y")},
     "英国 (UK)": {"IGLT.L": ("英国国债", "10Y"), "VGOV.L": ("英国长债", "30Y")},
@@ -70,22 +69,12 @@ def fetch_all_data():
                         "最新价": last, "昨日涨跌": d_r, "前5日累计": p_r, "状态": status, "国家": info.get("country", "N/A")})
     return close_data, pd.DataFrame(summary), bj_now_str
 
-# --- 修复报错的关键：改进后的表格美化函数 ---
 def style_table(df):
-    # 动态检测当前表格里有哪些列，避免 'not in index' 错误
     existing_cols = df.columns.tolist()
     subset_to_color = [c for c in ["昨日涨跌", "前5日累计"] if c in existing_cols]
-    
-    styler = df.style.format({
-        "最新价": "{:.2f}",
-        "昨日涨跌": "{:.2%}",
-        "前5日累计": "{:.2%}"
-    })
-    
-    # 只有当列存在时才涂色
+    styler = df.style.format({"最新价": "{:.2f}", "昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
     if subset_to_color:
-        styler = styler.map(lambda x: 'color: #00ff00' if isinstance(x,float) and x>0 else 'color: #ff4b4b' if isinstance(x,float) and x<0 else '', 
-                            subset=subset_to_color)
+        styler = styler.map(lambda x: 'color: #00ff00' if isinstance(x,float) and x>0 else 'color: #ff4b4b' if isinstance(x,float) and x<0 else '', subset=subset_to_color)
     return styler
 
 # --- 3. UI 布局 ---
@@ -96,15 +85,16 @@ try:
 
     tab_sum, tab_etf, tab_comm, tab_bond = st.tabs(["📋 全市场汇总", "📊 板块 ETF", "🛡️ 大宗商品", "🏛️ 全球国债"])
 
-    # --- TAB 1: 汇总 ---
+    # --- TAB 1: 汇总 (保持完整信息) ---
     with tab_sum:
         st.subheader("🚀 全资产涨跌排行榜")
         st.dataframe(style_table(df_summary), width="stretch", height="content", hide_index=True)
 
-    # --- TAB 2: ETF ---
+    # --- TAB 2: ETF (去掉国家和Tenor) ---
     with tab_etf:
         st.subheader("📋 ETF 板块行情汇总")
-        st.dataframe(style_table(df_summary[df_summary['分类'] == "ETF板块"]), width="stretch", height="content", hide_index=True)
+        etf_display = df_summary[df_summary['分类'] == "ETF板块"][["代码", "名称", "最新价", "昨日涨跌", "前5日累计", "状态"]]
+        st.dataframe(style_table(etf_display), width="stretch", height="content", hide_index=True)
         st.divider()
         cols = st.columns(4)
         for i, ticker in enumerate(ETFS.keys()):
@@ -114,10 +104,11 @@ try:
                 fig.update_layout(title=f"<b>{ticker}</b> ({ETFS[ticker]})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    # --- TAB 3: 商品 ---
+    # --- TAB 3: 商品 (去掉国家和Tenor) ---
     with tab_comm:
         st.subheader("📋 大宗商品行情汇总")
-        st.dataframe(style_table(df_summary[df_summary['分类'].str.contains("商品")]), width="stretch", height="content", hide_index=True)
+        comm_display = df_summary[df_summary['分类'].str.contains("商品")][["代码", "名称", "分类", "最新价", "昨日涨跌", "前5日累计", "状态"]]
+        st.dataframe(style_table(comm_display), width="stretch", height="content", hide_index=True)
         st.divider()
         for cat, tickers in COMMODITIES.items():
             st.markdown(f"#### {cat}类详情")
@@ -129,23 +120,12 @@ try:
                     fig.update_layout(title=f"<b>{ticker}</b> ({tickers[ticker]})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    # --- TAB 4: 全球国债 ---
+    # --- TAB 4: 全球国债 (保留国家信息) ---
     with tab_bond:
         st.subheader("📊 期限横向大比武 (各国国债价格表现)")
         selected_tenor = st.selectbox("选择对比期限：", ["10Y", "30Y", "2Y"])
-        # 这里增加了 '前5日累计' 以匹配 style_table 的需求
         comp_df = df_summary[df_summary['Tenor'] == selected_tenor].sort_values("昨日涨跌", ascending=False)
-        
-        c1, c2 = st.columns([0.6, 0.4])
-        with c1:
-            # 确保传递给 style_table 的 DataFrame 包含它需要的颜色列
-            st.dataframe(style_table(comp_df[["国家", "代码", "最新价", "昨日涨跌", "前5日累计", "状态"]]), 
-                         width="stretch", height="content", hide_index=True)
-        with c2:
-            fig_bar = px.bar(comp_df, x="昨日涨跌", y="国家", orientation='h', title=f"全球 {selected_tenor} 价格变动对比", 
-                             color="昨日涨跌", color_continuous_scale="RdYlGn", template="plotly_dark")
-            fig_bar.update_layout(height=300, margin=dict(l=10,r=10,t=40,b=10))
-            st.plotly_chart(fig_bar, use_container_width=True)
+        st.dataframe(style_table(comp_df[["国家", "代码", "最新价", "昨日涨跌", "前5日累计", "状态"]]), width="stretch", height="content", hide_index=True)
         
         st.divider()
         st.subheader("🏠 国家详情分布")
