@@ -6,13 +6,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import time
 
-# 1. 资产配置
+# 1. 资产配置（已移除国债板块）
 ASSETS = {
-    "美国国债 (Treasury)": {
-        "^IRX": "13周国债收益率", "^FVX": "5年期国债收益率", "^TNX": "10年期国债收益率", 
-        "^TYX": "30年期国债收益率", "SHY": "1-3年国债ETF", "IEF": "7-10年国债ETF", 
-        "TLT": "20年期+国债ETF", "AGG": "综合债券指数"
-    },
     "能源板块 (Energy)": {
         "USO": "WTI原油ETF", "BNO": "布伦特原油ETF", "NG=F": "天然气主力", 
         "HO=F": "柴油主力", "RB=F": "汽油主力", "XLE": "标普能源行业"
@@ -32,7 +27,7 @@ ASSETS = {
 
 TICKER_TO_NAME = {ticker: name for cat in ASSETS.values() for ticker, name in cat.items()}
 
-# 设置页面布局：虽然是 wide，但 st.columns 会处理手机适配
+# 设置页面布局：响应式排版
 st.set_page_config(page_title="全球市场实时监控看板", layout="wide")
 
 # --- 侧边栏控制 ---
@@ -52,6 +47,7 @@ def fetch_and_analyze():
     df_recent = yf.download(tickers, period="1d", interval="1m", progress=False)['Close']
     df_recent = df_recent.ffill()
 
+    # 统一北京时间
     beijing_now = datetime.utcnow() + timedelta(hours=8)
     bj_now_str = beijing_now.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -79,13 +75,13 @@ def fetch_and_analyze():
     return close_data, pd.DataFrame(summary_list), bj_now_str
 
 # --- UI 展示部分 ---
-st.title("🛡️ 全球资产实时监控")
+st.title("🛡️ 全球资产实时监控 (移动适配版)")
 
 try:
     close_data, summary_df, update_time = fetch_and_analyze()
     st.write(f"**同步时间 (北京):** `{update_time}`")
 
-    # 1. 总结表格（Streamlit 表格在手机上支持横向滚动）
+    # 1. 总结表格
     st.dataframe(
         summary_df.style.format({"最新价": "{:.2f}", "昨日涨跌": "{:.2%}", "前5日累计": "{:.2%}"})
         .map(lambda x: 'color: #00ff00' if isinstance(x, float) and x > 0 else 'color: #ff4b4b' if isinstance(x, float) and x < 0 else '', 
@@ -93,18 +89,16 @@ try:
         width="stretch", height=400, hide_index=True
     )
 
-    # 2. 分类图表展示 (核心修改点：使用 st.columns)
+    # 2. 分类图表展示
     st.divider()
     tabs = st.tabs(list(ASSETS.keys()))
     
     for tab, (cat_name, cat_tickers) in zip(tabs, ASSETS.items()):
         with tab:
-            # 创建 4 列容器。电脑端会并排，手机端会自动变成 1 列。
             cols = st.columns(4) 
             valid_tickers = [t for t in cat_tickers.keys() if t in close_data.columns]
             
             for i, ticker in enumerate(valid_tickers):
-                # 轮流放入 4 个列容器中
                 with cols[i % 4]:
                     data = close_data[ticker].dropna()
                     
@@ -116,7 +110,6 @@ try:
                     v_out = data.loc[rets[(rets > rets.quantile(0.75) + 1.5*iqr) | 
                                           (rets < rets.quantile(0.25) - 1.5*iqr)].index]
 
-                    # 为每个 ETF 创建独立的精简版图表
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5)))
                     
@@ -127,7 +120,7 @@ try:
 
                     fig.update_layout(
                         title=dict(text=f"<b>{ticker}</b><br>{cat_tickers[ticker]}", font=dict(size=14)),
-                        height=250, # 减小单个图表高度，适合手机滑动
+                        height=250, 
                         margin=dict(l=10, r=10, t=40, b=10),
                         template="plotly_dark",
                         showlegend=False,
