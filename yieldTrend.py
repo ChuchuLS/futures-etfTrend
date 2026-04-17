@@ -76,7 +76,8 @@ def fetch_all_data():
         })
     return close_data, pd.DataFrame(summary), bj_now_str
 
-def render_styled_table(df, height=None):
+# --- 【修复点】：使用 "content" 代替 None ---
+def render_styled_table(df, height="content"):
     """通用的表格渲染函数，支持颜色和高度自适应"""
     existing_cols = df.columns.tolist()
     subset_to_color = [c for c in ["价格变动", "前5日累计"] if c in existing_cols]
@@ -95,14 +96,14 @@ try:
 
     # --- TAB 1: 全市场汇总 ---
     with tabs[0]:
-        st.subheader("🚀 全资产排行榜 (固定高度以查看长表)")
+        st.subheader("🚀 全资产排行榜 (固定 600px 高度)")
         render_styled_table(df_summary, height=600)
 
     # --- TAB 2: 板块 ETF ---
     with tabs[1]:
-        st.subheader("📋 ETF 行情汇总 (自动收缩)")
+        st.subheader("📋 ETF 行情汇总")
         etf_df = df_summary[df_summary['分类'] == "ETF板块"][["代码", "名称", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]]
-        render_styled_table(etf_df) # 不传 height，自动收缩
+        render_styled_table(etf_df, height="content") # 自动适应行数
         st.divider()
         cols = st.columns(4)
         for i, ticker in enumerate(ETFS.keys()):
@@ -115,8 +116,8 @@ try:
     # --- TAB 3: 商品 ---
     with tabs[2]:
         st.subheader("📋 大宗商品汇总")
-        comm_df = df_summary[df_summary['分类'].str.contains("商品")][["代码", "名称", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]]
-        render_styled_table(comm_df)
+        comm_df = df_summary[df_summary['分类'].str.contains("商品")][["代码", "名称", "分类", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]]
+        render_styled_table(comm_df, height="content")
         st.divider()
         for cat, tickers in COMMODITIES.items():
             st.markdown(f"#### {cat}类详情")
@@ -130,11 +131,11 @@ try:
 
     # --- TAB 4: 全球国债 ---
     with tabs[3]:
-        st.subheader("📊 期限横向大比武 (自动收缩高度)")
+        st.subheader("📊 期限横向大比武")
         selected_tenor = st.selectbox("选择对比期限：", ["10Y", "30Y", "2Y"])
         bond_comp = df_summary[df_summary['Tenor'] == selected_tenor].sort_values("价格变动", ascending=False)
-        # 核心修复：这里不设置 height，彻底解决空白行问题
-        render_styled_table(bond_comp[["国家", "代码", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]])
+        # 核心修复点：这里设为 "content"，有多少行就显示多高
+        render_styled_table(bond_comp[["国家", "代码", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]], height="content")
         
         st.divider()
         st.subheader("🏠 国家详情分布")
