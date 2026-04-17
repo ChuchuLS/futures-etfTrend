@@ -19,7 +19,6 @@ COMMODITIES = {
     "金属": {"GLD": "黄金", "SLV": "白银", "CPER": "铜ETF", "PICK": "金属采矿", "DBB": "铝铜锌"},
     "农产品": {"SOYB": "大豆", "CORN": "玉米", "WEAT": "小麦", "SB=F": "原糖", "KC=F": "咖啡"}
 }
-# 收益率曲线分析专用代码：2年期 vs 10年期
 BONDS = {
     "美国 (USA)": {"SHY": ("1-3Y短债", "2Y"), "IEF": ("7-10Y中债", "10Y"), "TLT": ("20Y+长债", "30Y")},
     "英国 (UK)": {"IGLT.L": ("英国国债", "10Y"), "VGOV.L": ("英国长债", "30Y")},
@@ -28,7 +27,7 @@ BONDS = {
     "澳洲 (AUS)": {"VAF.AX": ("澳洲综合债", "10Y")},
     "加拿大 (CAN)": {"VGV.TO": ("加拿大国债", "10Y"), "VLB.TO": ("加拿大长债", "30Y")}
 }
-# 引入真实的收益率指数进行曲线计算
+# 引入收益率指数计算曲线
 YIELD_CURVE_TICKERS = {"^ZT=F": "US 2Y Yield", "^TNX": "US 10Y Yield"}
 
 ALL_TICKERS_INFO = {}
@@ -47,8 +46,7 @@ def fetch_all_data():
     df_hist = yf.download(all_tickers, period="1y", interval="1d", progress=False, threads=True)
     close_data = df_hist['Close'].ffill().bfill()
     df_recent = yf.download(all_tickers, period="2d", interval="5m", progress=False)['Close'].ffill().bfill()
-    beijing_now = datetime.utcnow() + timedelta(hours=8)
-    bj_now_str = beijing_now.strftime('%Y-%m-%d %H:%M:%S')
+    bj_now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
 
     summary = []
     for ticker in ALL_TICKERS_INFO.keys():
@@ -56,28 +54,30 @@ def fetch_all_data():
         info = ALL_TICKERS_INFO[ticker]
         last, prev, base5 = df_recent[ticker].iloc[-1], close_data[ticker].iloc[-2], close_data[ticker].iloc[-7]
         d_r = (last / prev) - 1
+        # 【关键修正】：确保列名统一为“行情日期”
+        eff_date = df_recent.index[-1].strftime('%m-%d')
         if abs(d_r) < 0.00001:
             for i in range(1, 6):
                 temp_r = (close_data[ticker].iloc[-i] / close_data[ticker].iloc[-(i+1)]) - 1
-                if abs(temp_r) > 0.00001: d_r, last = temp_r, close_data[ticker].iloc[-i]; break
-
+                if abs(temp_r) > 0.00001: 
+                    d_r, last = temp_r, close_data[ticker].iloc[-i]
+                    eff_date = close_data.index[-i].strftime('%m-%d')
+                    break
         p_r = (prev / base5) - 1
         is_bond = "国债" in info["cat"]
-        if is_bond: status = "📉收益率↓" if d_r > 0 else "📈收益率↑"
+        if is_bond: status = "🟢价格↑(收益↓)" if d_r > 0 else "🔴价格↓(收益↑)"
         else: status = "⭐反转" if d_r*p_r < 0 else ("📈上涨" if d_r > 0 else "📉下跌")
-        summary.append({"代码": ticker, "名称": info["name"], "分类": info["cat"], "Tenor": info["tenor"], 
-                        "最新价": last, "价格变动": d_r, "前5日累计": p_r, "状态趋势": status, "国家": info.get("country", "N/A")})
+        
+        summary.append({
+            "代码": ticker, "名称": info["name"], "分类": info["cat"], "Tenor": info["tenor"], 
+            "最新价": last, "行情日期": eff_date, "价格变动": d_r, "前5日累计": p_r, 
+            "状态趋势": status, "国家": info.get("country", "N/A")
+        })
     
-    # 额外计算美债收益率曲线状态
-    y_10y_now, y_10y_prev = df_recent["^TNX"].iloc[-1], close_data["^TNX"].iloc[-2]
-    y_2y_now, y_2y_prev = df_recent["^ZT=F"].iloc[-1], close_data["^ZT=F"].iloc[-2]
-    
-    curve_data = {
-        "10Y_delta": y_10y_now - y_10y_prev,
-        "2Y_delta": y_2y_now - y_2y_prev,
-        "spread_now": y_10y_now - y_2y_now,
-        "spread_prev": y_10y_prev - y_2y_prev
-    }
+    # 额外计算美债收益率曲线
+    y10_now, y10_prev = df_recent["^TNX"].iloc[-1], close_data["^TNX"].iloc[-2]
+    y2_now, y2_prev = df_recent["^ZT=F"].iloc[-1], close_data["^ZT=F"].iloc[-2]
+    curve_data = {"10Y_d": y10_now-y10_prev, "2Y_d": y2_now-y2_prev, "s_now": y10_now-y2_now, "s_prev": y10_prev-y2_prev}
     
     return close_data, pd.DataFrame(summary), bj_now_str, curve_data
 
@@ -97,83 +97,58 @@ try:
 
     tabs = st.tabs(["📋 全市场汇总", "🧠 跨市场逻辑分析", "📊 板块 ETF", "🛡️ 大宗商品", "🏛️ 全球国债"])
 
-    # --- TAB 1: 汇总 ---
+    # --- TAB 0: 汇总 ---
     with tabs[0]:
         st.subheader("🚀 全资产排行榜")
         render_styled_table(df_summary, height=600)
 
-    # --- TAB 2: 跨市场逻辑分析 (基于收益率曲线状态) ---
+    # --- TAB 1: 跨市场逻辑分析 ---
     with tabs[1]:
         st.subheader("🕵️‍♂️ 收益率曲线形态与跨市场联动")
+        d10, d2, s_now, s_prev = curve["10Y_d"], curve["2Y_d"], curve["s_now"], curve["s_prev"]
+        regime, color, desc = "未知", "gray", ""
         
-        # 核心曲线判断逻辑
-        s_now, s_prev = curve["spread_now"], curve["spread_prev"]
-        d10, d2 = curve["10Y_delta"], curve["2Y_delta"]
-        
-        regime = "未知"
-        description = ""
-        color_box = "gray"
-        
-        if d10 < 0 and d2 < 0: # Bull (Rates Down)
-            if s_now > s_prev:
-                regime, color_box = "Bull Steepening (牛陡)", "blue"
-                description = "利率全线下行，短端跌得更快。市场预期即将降息。**利好：科技股(XLK)、黄金、房地产(XLRE)**。"
-            else:
-                regime, color_box = "Bull Flattening (牛平)", "cyan"
-                description = "利率全线下行，长端跌得更快。通胀预期降温。**利好：长债(TLT)、防御性板块(XLU)**。"
-        else: # Bear (Rates Up)
-            if s_now > s_prev:
-                regime, color_box = "Bear Steepening (熊陡)", "orange"
-                description = "利率全线上行，长端涨得更快。再通胀预期抬头。**利好：能源(XLE)、金融(XLF)、大宗商品**。"
-            else:
-                regime, color_box = "Bear Flattening (熊平)", "red"
-                description = "利率全线上行，短端涨得更快。联储紧缩路径激进。**利空：几乎所有风险资产，尤其是高估值科技股**。"
+        if d10 < 0 and d2 < 0: # 牛市 (Bull)
+            if s_now > s_prev: regime, color, desc = "Bull Steepening (牛陡)", "blue", "利率下行+曲线变陡。预示降息周期开启。**利好：科技股(XLK)、黄金、地产**。"
+            else: regime, color, desc = "Bull Flattening (牛平)", "cyan", "利率下行+曲线变平。预示通胀降温。**利好：长债(TLT)、高股息防御板块**。"
+        else: # 熊市 (Bear)
+            if s_now > s_prev: regime, color, desc = "Bear Steepening (熊陡)", "orange", "利率上行+曲线变陡。预示再通胀与强增长。**利好：能源(XLE)、金融(XLF)、大宗商品**。"
+            else: regime, color, desc = "Bear Flattening (熊平)", "red", "利率上行+曲线变平。预示紧缩政策。**利空：高估值成长股，对风险资产压力大**。"
 
-        # 展示曲线状态
-        st.info(f"### 当前美债曲线状态：:{color_box}[{regime}]")
-        st.markdown(f"> {description}")
-        
+        st.info(f"### 当前美债曲线状态：:{color}[{regime}]")
+        st.markdown(f"> {desc}")
         st.divider()
         
         c1, c2 = st.columns([0.4, 0.6])
         with c1:
-            st.markdown("##### 🚀 联动逻辑校验")
-            # 根据 Regime 进行自动化校验
-            pairs = [
-                ("USO (原油)", "XLE (能源)", "熊陡共振 (再通胀)"),
-                ("TLT (长债)", "XLK (科技)", "牛平/牛陡共振 (估值修复)"),
-                ("GLD (黄金)", "USO (原油)", "通胀压力联动")
-            ]
-            for a1, a2, label in pairs:
-                r1 = df_summary[df_summary['代码'] == a1.split(' ')[0]]['价格变动'].values[0]
-                r2 = df_summary[df_summary['代码'] == a2.split(' ')[0]]['价格变动'].values[0]
+            st.markdown("##### 🚀 核心逻辑校验")
+            pairs = [("USO", "XLE", "能源共振"), ("TLT", "XLK", "估值共振"), ("GLD", "TLT", "避险共振")]
+            for c1_code, c2_code, label in pairs:
+                r1 = df_summary[df_summary['代码'] == c1_code]['价格变动'].values[0]
+                r2 = df_summary[df_summary['代码'] == c2_code]['价格变动'].values[0]
                 aligned = (r1 * r2 > 0)
                 st.write(f"**{label}**")
-                st.markdown(f"状态: {'✅ 吻合' if aligned else '❌ 背离'} | {a1}: {r1:+.2%} | {a2}: {r2:+.2%}")
-        
+                st.markdown(f"状态: {'✅ 吻合' if aligned else '❌ 背离'} | {c1_code}: {r1:+.2%} | {c2_code}: {r2:+.2%}")
         with c2:
-            st.markdown("##### 🌡️ 资产相关性矩阵")
-            core_t = ["XLK", "XLE", "TLT", "USO", "GLD", "XSD"]
-            corr = close_data[core_t].pct_change().tail(30).corr()
-            fig_h = px.imshow(corr, text_auto=".2f", color_continuous_scale='RdBu_r', aspect="auto")
-            fig_h.update_layout(template="plotly_dark", height=350, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig_h, use_container_width=True)
+            st.markdown("##### 🌡️ 核心资产相关性 (30日)")
+            corr = close_data[["XLK", "XLE", "TLT", "USO", "GLD", "XSD"]].pct_change().tail(30).corr()
+            st.plotly_chart(px.imshow(corr, text_auto=".2f", color_continuous_scale='RdBu_r', aspect="auto").update_layout(template="plotly_dark", height=350, margin=dict(l=10,r=10,t=10,b=10)), use_container_width=True)
 
-    # --- 后续分页保持原样 (TABS 2-4) ---
+    # --- TAB 2: ETF ---
     with tabs[2]:
         st.subheader("📋 ETF 行情汇总")
-        render_styled_table(df_summary[df_summary['分类'] == "ETF板块"][["代码", "名称", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]])
+        # 【关键修正】：确保这里的列表包含“行情日期”
+        render_styled_table(df_summary[df_summary['分类'] == "ETF板块"][["代码", "名称", "最新价", "行情日期", "价格变动", "前5日累计", "状态趋势"]])
         st.divider(); cols = st.columns(4)
         for i, ticker in enumerate(ETFS.keys()):
             with cols[i % 4]:
                 data = close_data[ticker].dropna()
-                fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5)))
-                fig.update_layout(title=f"<b>{ticker}</b> ({ETFS[ticker]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5))
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                st.plotly_chart(go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5))).update_layout(title=f"<b>{ticker}</b> ({ETFS[ticker]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5)), use_container_width=True, config={'displayModeBar': False})
 
+    # --- TAB 3: 商品 ---
     with tabs[3]:
         st.subheader("📋 大宗商品汇总")
-        render_styled_table(df_summary[df_summary['分类'].str.contains("商品")][["代码", "名称", "分类", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]])
+        render_styled_table(df_summary[df_summary['分类'].str.contains("商品")][["代码", "名称", "分类", "最新价", "行情日期", "价格变动", "前5日累计", "状态趋势"]])
         st.divider()
         for cat, tickers in COMMODITIES.items():
             st.markdown(f"#### {cat}类")
@@ -181,15 +156,14 @@ try:
             for i, ticker in enumerate(tickers.keys()):
                 with cols[i % 4]:
                     data = close_data[ticker].dropna()
-                    fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ff9900', width=1.5)))
-                    fig.update_layout(title=f"<b>{ticker}</b> ({tickers[ticker]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5))
-                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                    st.plotly_chart(go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ff9900', width=1.5))).update_layout(title=f"<b>{ticker}</b> ({tickers[ticker]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5)), use_container_width=True, config={'displayModeBar': False})
 
+    # --- TAB 4: 国债 ---
     with tabs[4]:
-        st.subheader("📊 全球国债横向比较")
-        selected_tenor = st.selectbox("对比期限：", ["10Y", "30Y", "2Y"])
-        bond_comp = df_summary[df_summary['Tenor'] == selected_tenor].sort_values("价格变动", ascending=False)
-        render_styled_table(bond_comp[["国家", "代码", "最新价", "日期", "价格变动", "前5日累计", "状态趋势"]], height="content")
+        st.subheader("📊 期限横向大比武")
+        tenor = st.selectbox("对比期限：", ["10Y", "30Y", "2Y"])
+        bond_comp = df_summary[df_summary['Tenor'] == tenor].sort_values("价格变动", ascending=False)
+        render_styled_table(bond_comp[["国家", "代码", "最新价", "行情日期", "价格变动", "前5日累计", "状态趋势"]])
         st.divider(); b_tabs = st.tabs(list(BONDS.keys()))
         for b_tab, (country, tickers_dict) in zip(b_tabs, BONDS.items()):
             with b_tab:
@@ -197,9 +171,7 @@ try:
                 for i, ticker in enumerate(tickers_dict.keys()):
                     with cols[i % 4]:
                         data = close_data[ticker].dropna()
-                        fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ffcc00', width=1.5)))
-                        fig.update_layout(title=f"<b>{ticker}</b> ({tickers_dict[ticker][0]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5))
-                        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                        st.plotly_chart(go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ffcc00', width=1.5))).update_layout(title=f"<b>{ticker}</b> ({tickers_dict[ticker][0]})", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5)), use_container_width=True, config={'displayModeBar': False})
 
     if st.sidebar.checkbox("自动刷新 (60s)", value=True):
         time.sleep(60); st.rerun()
