@@ -7,7 +7,7 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import time
 
-# --- 1. 全资产配置清单 ---
+# --- 1. 全资产配置清单 (更换了极其稳定的 ETF 行情源) ---
 ETFS = {
     'XLE': '能源', 'XLF': '金融', 'XLK': '科技', 'XLRE': '房地产', 'KBE': '银行股', 
     'KRE': '地区银行', 'ITB': '营建股', 'XHB': '家居装饰', 'XLI': '工业', 'XRT': '零售业', 
@@ -21,31 +21,37 @@ COMMODITIES = {
     "农产品": {"SOYB": "大豆", "CORN": "玉米", "WEAT": "小麦", "SB=F": "原糖", "KC=F": "咖啡"}
 }
 
+# 核心修改：使用各国最活跃的本币国债 ETF (解决 None 问题)
 BONDS = {
-    "美国 (USA)": {"^IRX": ("3月期", "Short"), "^FVX": ("5年期", "5Y"), "^TNX": ("10年期", "10Y"), "^TYX": ("30年期", "30Y")},
-    "英国 (UK)": {"^GUKG2": ("2年期", "2Y"), "^GUKG5": ("5年期", "5Y"), "^GUKG10": ("10年期", "10Y"), "^GUKG30": ("30年期", "30Y")},
-    "德国 (GER)": {"^GDBR2": ("2年期", "2Y"), "^GDBR5": ("5年期", "5Y"), "^GDBR10": ("10年期", "10Y"), "^GDBR30": ("30年期", "30Y")},
-    "日本 (JPN)": {"^GJGB2": ("2年期", "2Y"), "^GJGB5": ("5年期", "5Y"), "^GJGB10": ("10年期", "10Y"), "^GJGB30": ("30年期", "30Y")},
-    "澳洲 (AUS)": {"^GAUB2": ("2年期", "2Y"), "^GAUB5": ("5年期", "5Y"), "^GAUB10": ("10年期", "10Y"), "^GAUB30": ("30年期", "30Y")},
-    "加拿大 (CAN)": {"^GCAN2Y": ("2年期", "2Y"), "^GCAN5Y": ("5年期", "5Y"), "^GCAN10": ("10年期", "10Y"), "^GCAN30": ("30年期", "30Y")}
+    "美国 (USA)": {"SHY": ("1-3Y短债", "2Y"), "IEF": ("7-10Y中债", "10Y"), "TLT": ("20Y+长债", "30Y")},
+    "英国 (UK)": {"IGLT.L": ("英国国债(Gilts)", "10Y"), "VGOV.L": ("英国长债", "30Y")},
+    "德国 (GER)": {"BUND.DE": ("德国联邦债", "10Y"), "IS0L.DE": ("德国长债", "30Y")},
+    "日本 (JPN)": {"2556.T": ("日本JGB中债", "10Y"), "2512.T": ("日本JGB长债", "30Y")},
+    "澳洲 (AUS)": {"VAF.AX": ("澳洲综合债", "10Y")},
+    "加拿大 (CAN)": {"VGV.TO": ("加拿大国债", "10Y"), "VLB.TO": ("加拿大长债", "30Y")}
 }
 
 ALL_TICKERS_INFO = {}
-for k, v in ETFS.items(): ALL_TICKERS_INFO[k] = {"cat": "ETF", "name": v, "tenor": "N/A"}
+for k, v in ETFS.items(): ALL_TICKERS_INFO[k] = {"cat": "ETF板块", "name": v, "tenor": "N/A"}
 for cat, tickers in COMMODITIES.items():
     for k, v in tickers.items(): ALL_TICKERS_INFO[k] = {"cat": f"商品-{cat}", "name": v, "tenor": "N/A"}
 for country, tickers in BONDS.items():
     for k, v in tickers.items(): ALL_TICKERS_INFO[k] = {"cat": f"国债-{country}", "name": v[0], "tenor": v[1], "country": country}
 
-st.set_page_config(page_title="全球宏观工作站", layout="wide")
+st.set_page_config(page_title="全球宏观工作站 V2", layout="wide")
 
 # --- 2. 数据引擎 ---
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=300)
 def fetch_all_data():
     all_tickers = list(ALL_TICKERS_INFO.keys())
-    df_hist = yf.download(all_tickers, period="1y", progress=False)
-    close_data = df_hist['Close'].ffill().bfill()
-    df_recent = yf.download(all_tickers, period="2d", interval="1m", progress=False)['Close'].ffill().bfill()
+    # 扩大数据量以计算前5日，并增加 threads 提高多国抓取速度
+    df_hist = yf.download(all_tickers, period="1y", interval="1d", progress=False, threads=True)
+    close_data = df_hist['Close'] if isinstance(df_hist.columns, pd.MultiIndex) else df_hist[['Close']]
+    close_data = close_data.ffill().bfill()
+    
+    # 实时校准
+    df_recent = yf.download(all_tickers, period="2d", interval="5m", progress=False)['Close'].ffill().bfill()
+    
     beijing_now = datetime.utcnow() + timedelta(hours=8)
     bj_now_str = beijing_now.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -55,7 +61,14 @@ def fetch_all_data():
         info = ALL_TICKERS_INFO[ticker]
         last, prev, base5 = df_recent[ticker].iloc[-1], close_data[ticker].iloc[-2], close_data[ticker].iloc[-7]
         d_r, p_r = (last/prev)-1, (prev/base5)-1
-        status = "⭐反转" if d_r*p_r < 0 else ("📈上涨" if d_r > 0 else "📉下跌")
+        
+        # 债市特殊逻辑：ETF 价格涨 = 收益率跌
+        is_bond = "国债" in info["cat"]
+        if is_bond:
+            status = "📉收益率下行" if d_r > 0 else "📈收益率上行"
+        else:
+            status = "⭐反转" if d_r*p_r < 0 else ("📈上涨" if d_r > 0 else "📉下跌")
+            
         summary.append({"代码": ticker, "名称": info["name"], "分类": info["cat"], "Tenor": info["tenor"], 
                         "最新价": last, "昨日涨跌": d_r, "前5日": p_r, "状态": status, "国家": info.get("country", "N/A")})
     return close_data, pd.DataFrame(summary), bj_now_str
@@ -67,71 +80,71 @@ def style_table(df):
 # --- 3. UI 布局 ---
 try:
     close_data, df_summary, update_time = fetch_all_data()
-    st.title("🌐 全球宏观资产监控工作站")
-    st.write(f"最后同步 (北京): `{update_time}`")
+    st.title("🌐 全球宏观资产实时看板 (稳定版)")
+    st.write(f"最后同步 (北京): `{update_time}` | 💡 提示: 海外国债采用 ETF 价格行情，价格与收益率反向。")
 
-    # 定义顶级四大标签
     tab_sum, tab_etf, tab_comm, tab_bond = st.tabs(["📋 全市场汇总", "📊 板块 ETF", "🛡️ 大宗商品", "🏛️ 全球国债"])
 
-    # --- TAB 1: 全市场汇总 ---
+    # --- TAB 1: 汇总 ---
     with tab_sum:
-        st.subheader("🚀 全资产涨跌排行榜")
+        st.subheader("🚀 全资产排行榜")
         st.dataframe(style_table(df_summary), width="stretch", height="content", hide_index=True)
 
-    # --- TAB 2: 板块 ETF ---
+    # --- TAB 2: ETF ---
     with tab_etf:
-        st.subheader("📋 ETF 板块行情快报")
-        etf_summary = df_summary[df_summary['分类'] == "ETF"]
-        st.dataframe(style_table(etf_summary), width="stretch", height="content", hide_index=True)
-        
+        st.subheader("📋 ETF 板块汇总")
+        st.dataframe(style_table(df_summary[df_summary['分类'] == "ETF板块"]), width="stretch", height="content", hide_index=True)
         st.divider()
         cols = st.columns(4)
-        for i, (ticker, name) in enumerate(ETFS.items()):
+        for i, ticker in enumerate(ETFS.keys()):
             with cols[i % 4]:
                 data = close_data[ticker].dropna()
                 fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5)))
-                fig.update_layout(title=f"<b>{ticker}</b> ({name})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
+                fig.update_layout(title=f"<b>{ticker}</b> ({ETFS[ticker]})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    # --- TAB 3: 大宗商品 ---
+    # --- TAB 3: 商品 ---
     with tab_comm:
-        st.subheader("📋 大宗商品行情快报")
-        comm_summary = df_summary[df_summary['分类'].str.contains("商品")]
-        st.dataframe(style_table(comm_summary), width="stretch", height="content", hide_index=True)
-
+        st.subheader("📋 大宗商品汇总")
+        st.dataframe(style_table(df_summary[df_summary['分类'].str.contains("商品")]), width="stretch", height="content", hide_index=True)
         st.divider()
         for cat, tickers in COMMODITIES.items():
-            st.markdown(f"#### {cat}类详情")
+            st.markdown(f"#### {cat}类")
             cols = st.columns(4)
-            for i, (ticker, name) in enumerate(tickers.items()):
+            for i, ticker in enumerate(tickers.keys()):
                 with cols[i % 4]:
                     data = close_data[ticker].dropna()
                     fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ff9900', width=1.5)))
-                    fig.update_layout(title=f"<b>{ticker}</b> ({name})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
+                    fig.update_layout(title=f"<b>{ticker}</b> ({tickers[ticker]})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
                     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    # --- TAB 4: 全球国债 ---
+    # --- TAB 4: 全球国债 (Relative Value) ---
     with tab_bond:
-        st.subheader("📊 期限横向比武 (Relative Value)")
-        selected_tenor = st.select_slider("选择期限：", options=["2Y", "5Y", "10Y", "30Y"], value="10Y")
-        comp_df = df_summary[df_summary['Tenor'] == selected_tenor].sort_values("最新价", ascending=False)
-        st.dataframe(style_table(comp_df[["国家", "代码", "最新价", "昨日涨跌", "前5日", "状态"]]), width="stretch", height="content", hide_index=True)
+        st.subheader("📊 期限横向大比武 (各国国债价格表现)")
+        # 筛选出常用的 10Y 期限进行对比
+        selected_tenor = st.selectbox("选择对比期限：", ["10Y", "30Y", "2Y"])
+        comp_df = df_summary[df_summary['Tenor'] == selected_tenor].sort_values("昨日涨跌", ascending=False)
+        
+        c1, c2 = st.columns([0.6, 0.4])
+        with c1:
+            st.dataframe(style_table(comp_df[["国家", "代码", "最新价", "昨日涨跌", "状态"]]), width="stretch", height="content", hide_index=True)
+        with c2:
+            fig_bar = px.bar(comp_df, x="昨日涨跌", y="国家", orientation='h', title=f"全球 {selected_tenor} 价格变动", 
+                             color="昨日涨跌", color_continuous_scale="RdYlGn", template="plotly_dark")
+            fig_bar.update_layout(height=300, margin=dict(l=10,r=10,t=40,b=10))
+            st.plotly_chart(fig_bar, use_container_width=True)
         
         st.divider()
-        st.subheader("📋 国债详细行情快报 (按国家)")
-        bond_summary = df_summary[df_summary['分类'].str.contains("国债")].sort_values("国家")
-        st.dataframe(style_table(bond_summary), width="stretch", height="content", hide_index=True)
-
-        st.divider()
+        st.subheader("🏠 国家详情分布")
         b_tabs = st.tabs(list(BONDS.keys()))
         for b_tab, (country, tickers_dict) in zip(b_tabs, BONDS.items()):
             with b_tab:
                 cols = st.columns(4)
-                for i, (ticker, (name, tenor)) in enumerate(tickers_dict.items()):
+                for i, ticker in enumerate(tickers_dict.keys()):
                     with cols[i % 4]:
                         data = close_data[ticker].dropna()
                         fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#ffcc00', width=1.5)))
-                        fig.update_layout(title=f"<b>{ticker}</b> ({name})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
+                        fig.update_layout(title=f"<b>{ticker}</b> ({tickers_dict[ticker][0]})", height=200, template="plotly_dark", showlegend=False, margin=dict(l=10,r=10,t=40,b=10))
                         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     if st.sidebar.checkbox("自动刷新 (60s)", value=True):
