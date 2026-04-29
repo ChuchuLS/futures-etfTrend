@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime, timedelta, timezone
 import time
 
-# --- 1. 全资产配置清单 ---
+# --- 1. 配置清单 ---
 ETFS = {
     'XLK': '科技', 'XLE': '能源', 'XLF': '金融', 'XLRE': '房地产', 'KBE': '银行股', 
     'KRE': '地区银行', 'ITB': '营建股', 'XHB': '家居装饰', 'XLI': '工业', 'XRT': '零售业', 
@@ -31,35 +30,38 @@ BONDS = {
 st.set_page_config(page_title="全球宏观色谱工作站", layout="wide")
 
 # --- 2. 核心数据引擎 ---
-@st.cache_data(ttl=900) # 15分钟缓存，防止封IP
-def fetch_all_macro_data():
+@st.cache_data(ttl=900)
+def fetch_macro_data():
+    # 扩大范围：使用 ^FVX(5Y) 代替不稳的 2Y 收益率，确保历史数据连续
     curve_tickers = ["^TNX", "^FVX", "^ZT=F"]
     all_tickers = list(ETFS.keys()) + [t for cat in COMMODITIES.values() for t in cat.keys()] + [t for cat in BONDS.values() for t in cat.keys()] + curve_tickers
     
     try:
-        df_raw = yf.download(all_tickers, period="2y", interval="1d", progress=False, threads=False)
+        # 改为 5y，看更长线的走势
+        df_raw = yf.download(all_tickers, period="5y", interval="1d", progress=False, threads=False)
         close_data = df_raw['Close'].ffill().bfill()
+        # 实时校准
         df_rec = yf.download(all_tickers, period="2d", interval="15m", progress=False, threads=False)['Close'].ffill().bfill()
     except:
         return None, None, None, None
 
     bj_now = datetime.now(timezone(timedelta(hours=8))).strftime('%H:%M:%S')
 
-    # 计算色谱历史 - 智能容错短端
-    s_code = "^ZT=F" if "^ZT=F" in close_data.columns and not np.isnan(close_data["^ZT=F"].iloc[-1]) else "^FVX"
+    # 计算色谱 - 使用 5Y vs 10Y 作为稳健的曲线代表 (5s10s Spread)
+    s_code = "^FVX" 
     hist_df = close_data[[s_code, "^TNX"]].copy()
-    hist_df['Spread'] = (hist_df["^TNX"] - hist_df[s_code]) * 100 # 换算成基点
+    hist_df['Spread'] = (hist_df["^TNX"] - hist_df[s_code]) * 100 
     hist_df['d_s'] = hist_df[s_code].diff()
     hist_df['d_l'] = hist_df["^TNX"].diff()
     hist_df['d_spread'] = hist_df['Spread'].diff()
 
     def calc_regime(row):
         ds, ds_s, ds_l = row['d_spread'], row['d_s'], row['d_l']
-        if ds > 0: # Steepening
+        if ds > 0: 
             if ds_s < 0 and ds_l < 0: return ("Bull Steepener", "#00FF00")
             if ds_s > 0 and ds_l > 0: return ("Bear Steepener", "#FF8C00")
             return ("Steepener Twist", "#FF00FF")
-        else: # Flattening
+        else:
             if ds_s < 0 and ds_l < 0: return ("Bull Flattener", "#00FFFF")
             if ds_s > 0 and ds_l > 0: return ("Bear Flattener", "#FF0000")
             return ("Flattener Twist", "#FFFF00")
@@ -69,24 +71,24 @@ def fetch_all_macro_data():
     hist_df['Color'] = [x[1] if x else "gray" for x in reg_res]
 
     summary = []
-    for ticker, name in {**ETFS, **{t:n for c in COMMODITIES.values() for t,n in c.items()}, **{t:n[0] for c in BONDS.values() for t,n in c.items()}}.items():
+    full_list = {**ETFS, **{t:n for c in COMMODITIES.values() for t,n in c.items()}, **{t:n[0] for c in BONDS.values() for t,n in c.items()}}
+    for ticker, name in full_list.items():
         if ticker not in close_data.columns: continue
         last, prev, base5 = df_rec[ticker].iloc[-1], close_data[ticker].iloc[-2], close_data[ticker].iloc[-7]
         d_r, date_str = (last / prev) - 1, df_rec.index[-1].strftime('%m-%d')
         if abs(d_r) < 0.00001:
-            for i in range(1, 6):
+            for i in range(1, 10):
                 tr = (close_data[ticker].iloc[-i] / close_data[ticker].iloc[-(i+1)]) - 1
                 if abs(tr) > 0.00001: d_r, last, date_str = tr, close_data[ticker].iloc[-i], close_data.index[-i].strftime('%m-%d'); break
         
         summary.append({"代码": ticker, "名称": name, "最新价": last, "日期": date_str, "价格变动": d_r, "前5日累计": (prev/base5)-1,
-                        "分类": "国债" if "国债" in str(ticker) or ticker in [t for c in BONDS.values() for t in c.keys()] else "其他"})
+                        "分类": "国债" if ticker in [t for c in BONDS.values() for t in c.keys()] else "其他"})
 
     return close_data, pd.DataFrame(summary), bj_now, hist_df
 
 def render_table(df, h="content"):
     styler = df.style.format({"最新价": "{:.2f}", "价格变动": "{:.2%}", "前5日累计": "{:.2%}"})
-    exist = df.columns.tolist()
-    subset = [c for c in ["价格变动", "前5日累计"] if c in exist]
+    subset = [c for c in ["价格变动", "前5日累计"] if c in df.columns]
     if subset:
         styler = styler.map(lambda x: 'color: #00ff00' if isinstance(x,float) and x>0 else 'color: #ff4b4b' if isinstance(x,float) and x<0 else '', subset=subset)
     st.dataframe(styler, width="stretch", height=h, hide_index=True)
@@ -102,16 +104,16 @@ try:
 
         with tabs[1]:
             cur = hist_bond.iloc[-1]
-            # --- 修复笔误的关键位置：unsafe_allow_html ---
+            # --- 修正 unsafe_allow_html 参数 ---
             st.markdown(f"### 🛡️ 当前宏观状态: <span style='color:{cur['Color']}'>{cur['Regime']}</span>", unsafe_allow_html=True)
             
             fig = go.Figure()
-            # 颜色背景柱
             fig.add_trace(go.Bar(x=hist_bond.index, y=hist_bond['Spread'], marker_color=hist_bond['Color'], marker_line_width=0, opacity=0.8, name="Regime", customdata=hist_bond['Regime'], hovertemplate="状态: %{customdata}<extra></extra>"))
-            # 白色连线
             fig.add_trace(go.Scatter(x=hist_bond.index, y=hist_bond['Spread'], line=dict(color='white', width=1.5), name="Spread", hoverinfo='skip'))
 
-            fig.update_layout(height=450, template="plotly_dark", showlegend=False, margin=dict(l=10, r=10, t=30, b=10), yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray'))
+            fig.update_layout(height=450, template="plotly_dark", showlegend=False, margin=dict(l=10, r=10, t=30, b=10), 
+                              yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray'),
+                              xaxis=dict(range=[hist_bond.index[0], hist_bond.index[-1]])) # 强制缩放 X 轴到数据边缘
             st.plotly_chart(fig, width="stretch", config={'responsive': True})
 
             c = st.columns(6)
@@ -120,15 +122,17 @@ try:
         with tabs[0]: render_table(df_sum, h=600)
         
         with tabs[2]:
-            render_table(df_sum[df_sum['分类']=="其他"]) # 过滤出 ETF
+            render_table(df_sum[df_sum['分类']=="其他"])
             st.divider(); cols = st.columns(4)
-            for i, (t, n) in enumerate(ETFS.items()):
+            for i, t in enumerate(ETFS.keys()):
                 with cols[i%4]:
                     data = close_data[t].dropna()
-                    st.plotly_chart(go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5))).update_layout(title=f"<b>{t}</b>", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5)), width="stretch")
+                    fig = go.Figure(go.Scatter(x=data.index, y=data.values, line=dict(color='#00d4ff', width=1.5)))
+                    fig.update_layout(title=f"<b>{t}</b>", height=180, template="plotly_dark", showlegend=False, margin=dict(l=5,r=5,t=30,b=5))
+                    st.plotly_chart(fig, width="stretch")
 
         with tabs[3]:
-            render_table(df_sum[df_sum['分类'].str.contains("商品") if '分类' in df_sum.columns else df_sum.head(0)])
+            render_table(df_sum[df_sum['分类'].str.contains("商品")])
             st.divider(); cols = st.columns(4); all_c = [t for cat in COMMODITIES.values() for t in cat.keys()]
             for i, t in enumerate(all_c):
                 with cols[i%4]:
