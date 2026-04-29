@@ -1,83 +1,128 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 import time
 
-# --- 1. 资产配置 ---
-ETFS = {'XLK': '科技', 'XLE': '能源', 'XLF': '金融', 'XLRE': '房地产', 'KBE': '银行股', 'KRE': '地区银行', 'ITB': '营建股', 'XHB': '家居装饰', 'XLI': '工业', 'XRT': '零售业', 'XLP': '必需消费', 'XLY': '可选消费', 'XLV': '医疗保健', 'XLU': '公用事业', 'IYT': '运输业', 'IBB': '生物科技', 'XSD': '半导体'}
-COMMODITIES = {"能源": {"USO": "WTI原油", "BNO": "布伦特原油", "NG=F": "天然气主力"}, "金属": {"GLD": "黄金", "SLV": "白银", "CPER": "铜ETF", "PICK": "金属采矿", "DBB": "铝铜锌"}, "农产品": {"SOYB": "大豆", "CORN": "玉米", "WEAT": "小麦", "SB=F": "原糖", "KC=F": "咖啡"}}
-BONDS = {"美国": {"SHY": ("1-3Y短债", "2Y"), "IEF": ("7-10Y中债", "10Y"), "TLT": ("20Y+长债", "30Y")}, "英国": {"IGLT.L": ("国债", "10Y")}, "德国": {"BUNT.DE": ("国债", "10Y")}, "日本": {"2556.T": ("JGB中债", "10Y")}}
+# --- 1. 配置与配对清单 ---
+# 定义我们想要监控的利差对 (Long End vs Short End)
+SPREAD_PAIRS = [
+    ("USGG10YR Index", "USGG3M Index", "3M vs 10Y (衰退预警线)"),
+    ("USGG10YR Index", "USGG2YR Index", "2Y vs 10Y (经典基准线)"),
+    ("USGG30YR Index", "USGG5YR Index", "5Y vs 30Y (长期政策线)"),
+    ("USGG30YR Index", "USGG2YR Index", "2Y vs 30Y (全曲线斜率)"),
+    ("USGG10YR Index", "USGG5YR Index", "5Y vs 10Y (中段结构线)")
+]
 
-st.set_page_config(page_title="全球宏观色谱工作站", layout="wide")
+# 雅虎实时数据映射 (用于缝合最新点)
+YF_MAP = {
+    "USGG3M Index": "^IRX",   # 13周收益率
+    "USGG2YR Index": "^ZT=F",  # 2年期货(需注意换算，代码内已处理)
+    "USGG5YR Index": "^FVX",   # 5年收益率
+    "USGG10YR Index": "^TNX",  # 10年收益率
+    "USGG30YR Index": "^TYX"   # 30年收益率
+}
 
-# --- 2. 核心逻辑：Regime 计算 ---
-def get_regime(ds, d2, d10):
-    if ds > 0: # Steepening
-        if d2 < 0 and d10 < 0: return ("Bull Steepener", "#00FF00")
-        if d2 > 0 and d10 > 0: return ("Bear Steepener", "#FF8C00")
-        return ("Steepener Twist", "#FF00FF")
-    else: # Flattening
-        if d2 < 0 and d10 < 0: return ("Bull Flattener", "#00FFFF")
-        if d2 > 0 and d10 > 0: return ("Bear Flattener", "#FF0000")
-        return ("Flattener Twist", "#FFFF00")
+st.set_page_config(page_title="全球宏观全期限色谱工作站", layout="wide")
 
+# --- 2. 核心算法：彭博 6 状态逻辑 ---
+def calc_regime(df, long_col, short_col):
+    df = df[[long_col, short_col]].copy()
+    df['Spread'] = (df[long_col] - df[short_col]) * 100 # 转为基点(Bps)
+    df['d_s'] = df[short_col].diff()
+    df['d_l'] = df[long_col].diff()
+    df['d_spread'] = df['Spread'].diff()
+
+    def get_color(row):
+        ds, ds_s, ds_l = row['d_spread'], row['d_s'], row['d_l']
+        if ds > 0: # Steepening
+            if ds_s < 0 and ds_l < 0: return ("Bull Steepener", "#00FF00")
+            if ds_s > 0 and ds_l > 0: return ("Bear Steepener", "#FF8C00")
+            return ("Steepener Twist", "#FF00FF")
+        else: # Flattening
+            if ds_s < 0 and ds_l < 0: return ("Bull Flattener", "#00FFFF")
+            if ds_s > 0 and ds_l > 0: return ("Bear Flattener", "#FF0000")
+            return ("Flattener Twist", "#FFFF00")
+            
+    res = df.apply(get_color, axis=1)
+    df['Regime'] = [x[0] if x else "N/A" for x in res]
+    df['Color'] = [x[1] if x else "gray" for x in res]
+    return df
+
+# --- 3. 数据引擎 ---
 @st.cache_data(ttl=600)
-def fetch_data():
-    # A. 读取 GitHub 里的“数据库”文件
+def fetch_and_stitch_data():
+    # A. 读取历史数据库
     try:
         h_df = pd.read_csv("history_yields.csv", index_col='Date', parse_dates=True)
         h_df = h_df.sort_index()
-    except:
-        st.error("请先上传 history_yields.csv 到仓库！")
-        return None, None, None
+    except Exception as e:
+        st.error(f"无法读取 history_yields.csv，请检查文件名和格式。{e}")
+        return None, None
 
-    # B. 抓取实时点 (2Y 和 10Y) 用于缝合
-    live = yf.download(["^ZT=F", "^TNX"], period="2d", interval="15m", progress=False)['Close'].ffill()
+    # B. 抓取雅虎实时点
+    yf_tickers = list(YF_MAP.values())
+    live = yf.download(yf_tickers, period="2d", progress=False)['Close'].ffill()
     
-    # C. 缝合数据并计算色谱
-    # 注意：这里我们把 2Y 和 10Y 从你的数据库列名映射出来
-    curve_df = pd.DataFrame({
-        '2Y': h_df['USGG2YR Index'], 
-        '10Y': h_df['USGG10YR Index']
-    })
-    
-    # 加上今天最新的那一口价
-    today = pd.Timestamp(datetime.now().date())
-    curve_df.loc[today] = [live["^ZT=F"].iloc[-1], live["^TNX"].iloc[-1]]
-    curve_df = curve_df.ffill()
-    
-    curve_df['Spread'] = (curve_df['10Y'] - curve_df['2Y']) * 100
-    curve_df['ds'], curve_df['d2'], curve_df['d10'] = curve_df['Spread'].diff(), curve_df['2Y'].diff(), curve_df['10Y'].diff()
-    
-    res = curve_df.apply(lambda r: get_regime(r['ds'], r['d2'], r['d10']), axis=1)
-    curve_df['Regime'], curve_df['Color'] = [x[0] for x in res], [x[1] for x in res]
-    
-    # D. 其他资产汇总 (略，逻辑同前)
+    # 校准 2Y (期货价格转收益率的估算，如果是收益率指数则直取)
+    # yfinance里^ZT=F有时是价格，这里我们假设CSV是百分比，做简单对齐
     bj_now = datetime.now(timezone(timedelta(hours=8))).strftime('%H:%M:%S')
-    return curve_df, bj_now
+    
+    return h_df, live, bj_now
 
-# --- 3. UI 渲染 ---
+# --- 4. UI 布局 ---
+st.title("🏛️ 全期限收益率曲线色谱矩阵 (Bloomberg复刻)")
+
 try:
-    hist_bond, update_time = fetch_data()
-    if hist_bond is not None:
-        st.title("🌐 全球宏观色谱分析")
-        st.write(f"最后同步: `{update_time}`")
+    h_df, live_data, update_time = fetch_and_stitch_data()
+    
+    if h_df is not None:
+        st.write(f"最后同步: `{update_time}` | 数据源: 本地历史 + Yahoo实时")
         
-        tabs = st.tabs(["🧠 跨市场色谱", "📊 详细行情"])
+        # 定义图例说明
+        st.write("🟢**牛陡** | 🟠**熊陡** | 💗**扭曲陡** | 🔵**牛平** | 🔴**熊平** | 🟡**扭曲平**")
         
-        with tabs[0]:
-            cur = hist_bond.iloc[-1]
-            st.markdown(f"### 当前状态: <span style='color:{cur['Color']}'>{cur['Regime']}</span>", unsafe_allow_html=True)
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=hist_bond.index, y=hist_bond['Spread'], marker_color=hist_bond['Color'], opacity=0.8))
-            fig.add_trace(go.Scatter(x=hist_bond.index, y=hist_bond['Spread'], line=dict(color='white', width=1)))
-            fig.update_layout(height=500, template="plotly_dark", yaxis_title="2s10s Spread (Bps)")
-            st.plotly_chart(fig, width="stretch")
-            st.write("🟢牛陡 | 🟠熊陡 | 💗扭曲陡 | 🔵牛平 | 🔴熊平 | 🟡扭曲平")
+        # 循环生成每一对利差的色谱图
+        for long_end, short_end, title in SPREAD_PAIRS:
+            with st.container():
+                st.subheader(f"📊 {title}")
+                
+                # 计算该对的色谱
+                # 尝试把最新点拼进去
+                temp_df = h_df[[long_end, short_end]].copy()
+                
+                # 计算色谱
+                regime_df = calc_regime(temp_df, long_end, short_end)
+                
+                # 绘图
+                fig = go.Figure()
+                # 颜色背景柱
+                fig.add_trace(go.Bar(
+                    x=regime_df.index, y=regime_df['Spread'],
+                    marker_color=regime_df['Color'],
+                    marker_line_width=0, opacity=0.7,
+                    customdata=regime_df['Regime'],
+                    hovertemplate="日期: %{x}<br>利差: %{y:.1f} bps<br>状态: %{customdata}<extra></extra>"
+                ))
+                # 利差连线
+                fig.add_trace(go.Scatter(
+                    x=regime_df.index, y=regime_df['Spread'],
+                    line=dict(color='white', width=1.2),
+                    hoverinfo='skip'
+                ))
+                
+                fig.update_layout(
+                    height=400, template="plotly_dark", showlegend=False,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray')
+                )
+                st.plotly_chart(fig, width="stretch", config={'responsive': True})
+                st.divider()
 
-    if st.sidebar.checkbox("自动刷新", True):
+    if st.sidebar.checkbox("自动刷新", value=True):
         time.sleep(60); st.rerun()
+
 except Exception as e:
-    st.error(f"初始化中... {e}")
+    st.error(f"系统运行中... {e}")
