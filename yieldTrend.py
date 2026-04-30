@@ -14,7 +14,7 @@ SPREAD_PAIRS = [
     ("USGG10YR Index", "USGG5YR Index", "5Y vs 10Y (中段结构线)")
 ]
 
-# 雅虎与本地 CSV 列名的映射关系
+# 雅虎与本地 CSV 列名的映射
 YF_MAP = {
     "^IRX": "USGG3M Index",
     "^ZT=F": "USGG2YR Index",
@@ -25,10 +25,10 @@ YF_MAP = {
 
 st.set_page_config(page_title="全球宏观色谱矩阵-智能补全版", layout="wide")
 
-# --- 2. 核心算法：计算 Regime ---
+# --- 2. 核心算法 ---
 def calc_regime(df, long_col, short_col):
     df = df[[long_col, short_col]].copy()
-    df['Spread'] = (df[long_col] - df[short_col]) * 100 # 转为基点
+    df['Spread'] = (df[long_col] - df[short_col]) * 100
     df['d_s'] = df[short_col].diff()
     df['d_l'] = df[long_col].diff()
     df['d_spread'] = df['Spread'].diff()
@@ -50,37 +50,43 @@ def calc_regime(df, long_col, short_col):
     df['Color'] = [x[1] if x else "gray" for x in res]
     return df
 
-# --- 3. 智能补全引擎 ---
-@st.cache_data(ttl=3600) # 缓存 1 小时，进入页面只抓一次
+# --- 3. 智能补全引擎 (修复时区比较报错) ---
+@st.cache_data(ttl=3600)
 def fetch_and_fill_data():
     try:
-        # A. 读取历史 CSV
         h_df = pd.read_csv("history_yields.csv", index_col='Date', parse_dates=True)
         h_df = h_df.sort_index()
+        # 强制把 CSV 的索引转为不带时区的格式
+        if h_df.index.tz is not None:
+            h_df.index = h_df.index.tz_localize(None)
         last_date_in_csv = h_df.index[-1]
     except Exception as e:
         st.error(f"本地数据库读取失败: {e}")
         return None
 
-    # B. 检查日期差，如果 CSV 数据不是今天的，则去雅虎补全
-    today_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # 【关键修复】：获取不带时区的“今天”
+    today_naive = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
-    if last_date_in_csv < today_utc:
-        tickers = list(YF_MAP.keys())
-        # 从 CSV 最后日期的次日开始抓取
-        start_fetch = last_date_in_csv + timedelta(days=1)
-        new_data_raw = yf.download(tickers, start=start_fetch, progress=False)['Close']
-        
-        if not new_data_raw.empty:
-            # 统一列名：把 ^TNX 换回 USGG10YR Index 等
-            new_data_renamed = new_data_raw.rename(columns=YF_MAP)
-            # 合并历史与新抓取的数据
-            combined_df = pd.concat([h_df, new_data_renamed])
-            # 去重并排序
-            combined_df = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
-            # 填充可能存在的空值（如某天只有美债开市）
-            combined_df = combined_df.ffill()
-            return combined_df
+    # 如果 CSV 还没更新到今天，尝试去抓取
+    if last_date_in_csv < today_naive:
+        try:
+            tickers = list(YF_MAP.keys())
+            start_fetch = last_date_in_csv + timedelta(days=1)
+            # 抓取实时点位
+            new_data_raw = yf.download(tickers, start=start_fetch, progress=False)['Close']
+            
+            if not new_data_raw.empty:
+                if new_data_raw.index.tz is not None:
+                    new_data_raw.index = new_data_raw.index.tz_localize(None)
+                
+                new_data_renamed = new_data_raw.rename(columns=YF_MAP)
+                combined_df = pd.concat([h_df, new_data_renamed])
+                combined_df = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
+                combined_df = combined_df.ffill()
+                return combined_df
+        except Exception as yf_err:
+            st.warning(f"实时行情补全失败（可能是雅虎限制），目前显示历史缓存数据。")
+            return h_df
     
     return h_df
 
@@ -91,20 +97,22 @@ try:
     df_full = fetch_and_fill_data()
     
     if df_full is not None:
-        current_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
-        st.write(f"**数据更新至:** `{df_full.index[-1].strftime('%Y-%m-%d')}` | **同步时间:** `{current_time}`")
+        # 获取北京时间显示
+        bj_time = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+        st.write(f"**数据更新至:** `{df_full.index[-1].strftime('%Y-%m-%d')}` | **同步时间 (北京):** `{bj_time}`")
         st.write("🟢牛陡 | 🟠熊陡 | 💗扭曲陡 | 🔵牛平 | 🔴熊平 | 🟡扭曲平")
         
         for long_end, short_end, title in SPREAD_PAIRS:
+            # 确保列名在数据中存在
             if long_end in df_full.columns and short_end in df_full.columns:
                 with st.container():
                     st.subheader(f"📊 {title}")
                     
-                    # 计算色谱
+                    # 计算该对的色谱
                     regime_df = calc_regime(df_full, long_end, short_end)
                     
                     fig = go.Figure()
-                    # 1. 颜色背景柱 (Bar)
+                    # 1. 颜色背景柱
                     fig.add_trace(go.Bar(
                         x=regime_df.index, y=regime_df['Spread'],
                         marker_color=regime_df['Color'],
@@ -112,30 +120,22 @@ try:
                         customdata=regime_df['Regime'],
                         hovertemplate="日期: %{x}<br>利差: %{y:.1f} bps<br>状态: %{customdata}<extra></extra>"
                     ))
-                    # 2. 利差连线 (Scatter)
+                    # 2. 利差连线
                     fig.add_trace(go.Scatter(
                         x=regime_df.index, y=regime_df['Spread'],
                         line=dict(color='white', width=1.5),
                         hoverinfo='skip'
                     ))
                     
-                    # 布局设置：优化 Zoom 体验
                     fig.update_layout(
-                        height=550, # 足够高，zoom 后不切顶
-                        template="plotly_dark",
-                        showlegend=False,
+                        height=550, template="plotly_dark", showlegend=False,
                         margin=dict(l=10, r=10, t=30, b=30),
-                        yaxis=dict(
-                            title="Spread (Bps)", 
-                            zeroline=True, zerolinecolor='gray',
-                            autorange=True, fixedrange=False
-                        ),
-                        xaxis=dict(fixedrange=False),
-                        uirevision='constant' # 刷新不重置缩放
+                        yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray', autorange=True, fixedrange=False),
+                        xaxis=dict(fixedrange=False, range=[regime_df.index[0], regime_df.index[-1]]),
+                        uirevision='constant'
                     )
-                    
                     st.plotly_chart(fig, width="stretch", config={'responsive': True})
                     st.divider()
 
 except Exception as e:
-    st.error(f"正在准备数据，请稍候... (错误详情: {e})")
+    st.error(f"分析出错: {e}")
