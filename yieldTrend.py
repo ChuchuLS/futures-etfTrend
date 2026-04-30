@@ -14,7 +14,6 @@ SPREAD_PAIRS = [
     ("USGG10YR Index", "USGG5YR Index", "5Y vs 10Y (中段结构线)")
 ]
 
-# 雅虎与本地 CSV 列名的映射
 YF_MAP = {
     "^IRX": "USGG3M Index",
     "^ZT=F": "USGG2YR Index",
@@ -23,7 +22,7 @@ YF_MAP = {
     "^TYX": "USGG30YR Index"
 }
 
-st.set_page_config(page_title="全球宏观色谱矩阵-智能补全版", layout="wide")
+st.set_page_config(page_title="全球宏观色谱矩阵-2026修复版", layout="wide")
 
 # --- 2. 核心算法 ---
 def calc_regime(df, long_col, short_col):
@@ -50,44 +49,40 @@ def calc_regime(df, long_col, short_col):
     df['Color'] = [x[1] if x else "gray" for x in res]
     return df
 
-# --- 3. 智能补全引擎 (修复时区比较报错) ---
+# --- 3. 智能补全引擎 (解决时区报错 + 增强容错) ---
 @st.cache_data(ttl=3600)
 def fetch_and_fill_data():
     try:
         h_df = pd.read_csv("history_yields.csv", index_col='Date', parse_dates=True)
         h_df = h_df.sort_index()
-        # 强制把 CSV 的索引转为不带时区的格式
         if h_df.index.tz is not None:
             h_df.index = h_df.index.tz_localize(None)
-        last_date_in_csv = h_df.index[-1]
+        last_date = h_df.index[-1]
     except Exception as e:
         st.error(f"本地数据库读取失败: {e}")
         return None
 
-    # 【关键修复】：获取不带时区的“今天”
     today_naive = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 如果 CSV 还没更新到今天，尝试去抓取
-    if last_date_in_csv < today_naive:
+    if last_date < today_naive:
         try:
             tickers = list(YF_MAP.keys())
-            start_fetch = last_date_in_csv + timedelta(days=1)
-            # 抓取实时点位
-            new_data_raw = yf.download(tickers, start=start_fetch, progress=False)['Close']
+            start_f = last_date + timedelta(days=1)
+            # 设置 timeout 避免卡死
+            new_data_raw = yf.download(tickers, start=start_f, progress=False, timeout=10)['Close']
             
             if not new_data_raw.empty:
+                if isinstance(new_data_raw, pd.Series): # 单个数据处理
+                    new_data_raw = new_data_raw.to_frame()
                 if new_data_raw.index.tz is not None:
                     new_data_raw.index = new_data_raw.index.tz_localize(None)
                 
                 new_data_renamed = new_data_raw.rename(columns=YF_MAP)
-                combined_df = pd.concat([h_df, new_data_renamed])
-                combined_df = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
-                combined_df = combined_df.ffill()
-                return combined_df
-        except Exception as yf_err:
-            st.warning(f"实时行情补全失败（可能是雅虎限制），目前显示历史缓存数据。")
-            return h_df
-    
+                combined = pd.concat([h_df, new_data_renamed])
+                combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+                return combined.ffill()
+        except:
+            return h_df # 失败则返回历史
     return h_df
 
 # --- 4. UI 渲染 ---
@@ -97,22 +92,26 @@ try:
     df_full = fetch_and_fill_data()
     
     if df_full is not None:
-        # 获取北京时间显示
-        bj_time = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+        bj_time = (datetime.now(timezone(timedelta(hours=8)))).strftime('%Y-%m-%d %H:%M:%S')
         st.write(f"**数据更新至:** `{df_full.index[-1].strftime('%Y-%m-%d')}` | **同步时间 (北京):** `{bj_time}`")
         st.write("🟢牛陡 | 🟠熊陡 | 💗扭曲陡 | 🔵牛平 | 🔴熊平 | 🟡扭曲平")
         
         for long_end, short_end, title in SPREAD_PAIRS:
-            # 确保列名在数据中存在
             if long_end in df_full.columns and short_end in df_full.columns:
                 with st.container():
                     st.subheader(f"📊 {title}")
                     
-                    # 计算该对的色谱
                     regime_df = calc_regime(df_full, long_end, short_end)
                     
+                    # --- 【核心修复：手动计算 Y 轴缓冲区】 ---
+                    y_min = regime_df['Spread'].min()
+                    y_max = regime_df['Spread'].max()
+                    y_range_spread = y_max - y_min
+                    # 顶部留 20% 的余量，底部留 10%
+                    y_limit_top = y_max + (y_range_spread * 0.2)
+                    y_limit_bottom = y_min - (y_range_spread * 0.1)
+
                     fig = go.Figure()
-                    # 1. 颜色背景柱
                     fig.add_trace(go.Bar(
                         x=regime_df.index, y=regime_df['Spread'],
                         marker_color=regime_df['Color'],
@@ -120,7 +119,6 @@ try:
                         customdata=regime_df['Regime'],
                         hovertemplate="日期: %{x}<br>利差: %{y:.1f} bps<br>状态: %{customdata}<extra></extra>"
                     ))
-                    # 2. 利差连线
                     fig.add_trace(go.Scatter(
                         x=regime_df.index, y=regime_df['Spread'],
                         line=dict(color='white', width=1.5),
@@ -128,10 +126,21 @@ try:
                     ))
                     
                     fig.update_layout(
-                        height=550, template="plotly_dark", showlegend=False,
-                        margin=dict(l=10, r=10, t=30, b=30),
-                        yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray', autorange=True, fixedrange=False),
-                        xaxis=dict(fixedrange=False, range=[regime_df.index[0], regime_df.index[-1]]),
+                        height=600, # 增加总高度
+                        template="plotly_dark",
+                        showlegend=False,
+                        margin=dict(l=10, r=10, t=100, b=30), # 显著增加顶部 Margin
+                        yaxis=dict(
+                            title="Spread (Bps)", 
+                            zeroline=True, zerolinecolor='gray',
+                            range=[y_limit_bottom, y_limit_top], # 强行设置缓冲区
+                            autorange=False, # 使用我们手动计算的精准范围
+                            fixedrange=False # 依然允许用户缩放
+                        ),
+                        xaxis=dict(
+                            fixedrange=False, 
+                            range=[regime_df.index[0], regime_df.index[-1]]
+                        ),
                         uirevision='constant'
                     )
                     st.plotly_chart(fig, width="stretch", config={'responsive': True})
