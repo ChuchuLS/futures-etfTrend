@@ -72,29 +72,62 @@ def add_regimes(df, spread_col, short_col, long_col, lookback=60):
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 @st.cache_data
-def load_data(file) -> pd.DataFrame:
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
-
+def clean_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardise a single sheet: strip column names, parse Date, ffill blanks, sort."""
+    df = df.copy()
     df.columns = df.columns.str.strip()
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
+    # Forward-fill then back-fill so no NaN gaps remain
+    num_cols = df.select_dtypes(include="number").columns
+    df[num_cols] = df[num_cols].ffill().bfill()
+    return df
 
-    # Rename Bloomberg tickers to short names
+def shorten(col: str) -> str:
+    """Strip Bloomberg suffix from column name."""
+    return col.replace(" Comdty", "").replace(" Index", "").strip()
+
+def load_all_sheets(file) -> dict:
+    """Return dict of {sheet_name: DataFrame} for all sheets found."""
+    name = file.name.lower()
+    sheets = {}
+    if name.endswith(".csv"):
+        df = pd.read_csv(file)
+        df.columns = df.columns.str.strip()
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date").reset_index(drop=True)
+        sheets["yields"] = df
+    else:
+        xl = pd.ExcelFile(file)
+        for sheet in xl.sheet_names:
+            try:
+                df = xl.parse(sheet)
+                if "Date" not in df.columns and df.columns[0] != "Date":
+                    df = df.rename(columns={df.columns[0]: "Date"})
+                df = clean_sheet(df)
+                # Shorten Bloomberg column names
+                df.columns = [shorten(c) if c != "Date" else c for c in df.columns]
+                sheets[sheet] = df
+            except Exception:
+                pass
+    return sheets
+
+@st.cache_data
+def load_data(file) -> pd.DataFrame:
+    """Legacy: return yields sheet only, renamed for backward compat."""
+    sheets = load_all_sheets(file)
+    df = sheets.get("yields", list(sheets.values())[0])
     rename = {
-        "USGG2YR Index":  "2Y",
-        "USGG10YR Index": "10Y",
-        "USGG30YR Index": "30Y",
-        "USGG3M Index":   "3M",
-        "USGG5YR Index":  "5Y",
-        "USGG12M Index":  "12M",
-        "USGG20YR Index": "20Y",
+        "USGG2YR":  "2Y", "USGG10YR": "10Y", "USGG30YR": "30Y",
+        "USGG3M":   "3M", "USGG5YR":  "5Y",  "USGG12M":  "12M",
+        "USGG20YR": "20Y",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     return df
+
+@st.cache_data
+def load_sheets(file) -> dict:
+    return load_all_sheets(file)
 
 # ── Spread chart builder ──────────────────────────────────────────────────────
 def spread_chart(df, short, long, title, lookback=60):
@@ -261,3 +294,194 @@ for short, long, title in spreads_to_plot:
 with st.expander("View raw data"):
     st.dataframe(df_view[["Date"] + tenors].set_index("Date").sort_index(ascending=False),
                  use_container_width=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# COMMODITIES & ENERGY PAGE
+# ════════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("📦 Commodities & Energy — Long-term Trend")
+
+sheets = load_sheets(uploaded)
+
+METAL_GROUPS = {
+    "Precious Metals":  ["GC1", "SI1", "PL1", "PA1"],
+    "Base Metals (LME)":["LMCADS03","LMAHDS03","LMZSDS03","LMPBDS03","LMNIDS03","LMSNDS03"],
+    "Copper":           ["HG1"],
+}
+ENERGY_COLS = ["CL1 COMB", "CO1", "NG1"]
+
+def trend_chart(df, cols, title, period_days, normalize=False):
+    """Line chart of selected columns over the period."""
+    available = [c for c in cols if c in df.columns]
+    if not available:
+        st.caption(f"No data for: {cols}")
+        return
+    cutoff = df["Date"].max() - pd.Timedelta(days=period_days)
+    dff = df[df["Date"] >= cutoff][["Date"] + available].copy()
+
+    fig = go.Figure()
+    palette = ["#378ADD","#1D9E75","#D85A30","#9F77DD","#E8A838",
+               "#E05C8A","#4ade80","#f87171","#60a5fa","#facc15","#fb923c","#c084fc"]
+    for i, col in enumerate(available):
+        y = dff[col]
+        if normalize:
+            base = y.iloc[0] if y.iloc[0] != 0 else 1
+            y = (y / base - 1) * 100
+        fig.add_trace(go.Scatter(
+            x=dff["Date"], y=y,
+            name=col, mode="lines",
+            line=dict(width=1.5, color=palette[i % len(palette)]),
+        ))
+
+    yaxis_title = "% change from start" if normalize else "Price"
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=13)),
+        height=280,
+        margin=dict(l=50, r=20, t=36, b=36),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=10)),
+        yaxis=dict(title=yaxis_title),
+        xaxis=dict(type="date", showgrid=False),
+        hovermode="x unified",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# Sidebar additions
+st.sidebar.divider()
+st.sidebar.subheader("Commodities")
+comm_period = st.sidebar.selectbox("Trend period", ["1Y","2Y","5Y","10Y","All"], index=2, key="comm_period")
+normalize = st.sidebar.checkbox("Normalize to % return", value=False)
+comm_days = {"1Y":365,"2Y":730,"5Y":1825,"10Y":3650,"All":99999}[comm_period]
+
+metal_df   = sheets.get("metal",   pd.DataFrame())
+energy_df  = sheets.get("energy",  pd.DataFrame())
+
+if metal_df.empty and energy_df.empty:
+    st.info("No 'metal' or 'energy' sheets found in the uploaded file.")
+else:
+    if not metal_df.empty:
+        st.subheader("Metals")
+        for group_name, cols in METAL_GROUPS.items():
+            avail = [c for c in cols if c in metal_df.columns]
+            if avail:
+                trend_chart(metal_df, avail, group_name, comm_days, normalize)
+
+    if not energy_df.empty:
+        st.subheader("Energy")
+        # Use whatever columns exist (CL1, CO1, NG1 variants)
+        ecols = [c for c in energy_df.columns if c != "Date"]
+        trend_chart(energy_df, ecols, "Energy prices", comm_days, normalize)
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CROSS-ASSET CORRELATION PAGE
+# ════════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("🔗 Cross-asset Rolling Correlation")
+
+# Sidebar
+st.sidebar.divider()
+st.sidebar.subheader("Correlation")
+corr_window = st.sidebar.selectbox("Window", ["1M (21d)","3M (63d)","6M (126d)"], index=1, key="corr_win")
+corr_period = st.sidebar.selectbox("History", ["1Y","2Y","5Y","All"], index=1, key="corr_period")
+win_map = {"1M (21d)":21,"3M (63d)":63,"6M (126d)":126}
+window = win_map[corr_window]
+corr_days = {"1Y":365,"2Y":730,"5Y":1825,"All":99999}[corr_period]
+
+# Build unified price dataframe from all sheets
+def build_unified(sheets, days):
+    frames = []
+    for sheet, df in sheets.items():
+        if df.empty or "Date" not in df.columns:
+            continue
+        cutoff = df["Date"].max() - pd.Timedelta(days=days)
+        dff = df[df["Date"] >= cutoff].set_index("Date")
+        # Prefix columns with sheet name to avoid collisions
+        dff.columns = [f"{sheet}:{c}" for c in dff.columns]
+        frames.append(dff)
+    if not frames:
+        return pd.DataFrame()
+    unified = frames[0]
+    for f in frames[1:]:
+        unified = unified.join(f, how="outer")
+    unified = unified.sort_index().ffill().bfill()
+    return unified
+
+# Let user pick two assets to correlate
+unified = build_unified(sheets, corr_days)
+if unified.empty:
+    st.info("Upload a multi-sheet file to see cross-asset correlations.")
+else:
+    all_assets = list(unified.columns)
+    col_a, col_b = st.columns(2)
+    default_a = next((c for c in all_assets if "10Y" in c or "GC1" in c), all_assets[0])
+    default_b = next((c for c in all_assets if "CL1" in c or "GC1" in c and c != default_a), all_assets[min(1,len(all_assets)-1)])
+    asset_a = col_a.selectbox("Asset A", all_assets, index=all_assets.index(default_a), key="ca")
+    asset_b = col_b.selectbox("Asset B", all_assets, index=all_assets.index(default_b), key="cb")
+
+    if asset_a != asset_b:
+        rets = unified[[asset_a, asset_b]].pct_change().dropna()
+        rolling_corr = rets[asset_a].rolling(window).corr(rets[asset_b]).dropna()
+
+        # Color by positive/negative
+        colors = ["#1D9E75" if v >= 0 else "#D85A30" for v in rolling_corr]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=rolling_corr.index,
+            y=rolling_corr.values,
+            marker=dict(color=colors, line_width=0),
+            width=int(0.7 * 86_400_000),
+            showlegend=False,
+            hovertemplate="<b>%{x|%b %d %Y}</b><br>Corr: %{y:.3f}<extra></extra>",
+        ))
+        fig.add_hline(y=0, line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
+        fig.add_hline(y=0.7,  line_dash="dot", line_color="rgba(29,158,117,0.4)",  line_width=1)
+        fig.add_hline(y=-0.7, line_dash="dot", line_color="rgba(216,90,48,0.4)",   line_width=1)
+        fig.update_layout(
+            title=dict(text=f"Rolling {corr_window} correlation: {asset_a} vs {asset_b}", font=dict(size=13)),
+            height=300,
+            margin=dict(l=50, r=20, t=40, b=36),
+            yaxis=dict(title="Correlation", range=[-1.05, 1.05], tickformat=".2f",
+                       zeroline=False),
+            xaxis=dict(type="date", showgrid=False),
+            hovermode="x",
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Correlation heatmap across all assets (latest window)
+        st.subheader(f"Current {corr_window} correlation matrix")
+        rets_all = unified.pct_change().dropna().iloc[-window:]
+        corr_matrix = rets_all.corr()
+        # Strip sheet prefix for display
+        short_labels = [c.split(":")[-1] for c in corr_matrix.columns]
+
+        import plotly.figure_factory as ff
+        z = corr_matrix.values.round(2).tolist()
+        heat = go.Figure(go.Heatmap(
+            z=z,
+            x=short_labels, y=short_labels,
+            colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
+            text=[[f"{v:.2f}" for v in row] for row in z],
+            texttemplate="%{text}",
+            textfont=dict(size=9),
+            showscale=True,
+            colorbar=dict(thickness=12, len=0.8),
+        ))
+        heat.update_layout(
+            height=max(350, len(short_labels)*28 + 80),
+            margin=dict(l=80, r=20, t=20, b=80),
+            xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+            yaxis=dict(tickfont=dict(size=10)),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(heat, use_container_width=True)
+    else:
+        st.info("Select two different assets to compute correlation.")
