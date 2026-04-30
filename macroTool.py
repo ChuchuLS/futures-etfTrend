@@ -102,64 +102,74 @@ def spread_chart(df, short, long, title, lookback=60):
         st.warning(f"Missing columns: {short} or {long}")
         return
 
-    spread = (df[long] - df[short]) * 100  # in bps
+    spread = (df[long] - df[short]) * 100  # bps
     regimes = add_regimes(df, f"{short}{long}", short, long, lookback)
-    bar_colors = [REGIME_COLORS[r] for r in regimes]
 
-    fig = go.Figure()
-
-    # Draw each bar as a vertical line segment using Scatter mode="lines".
-    # Bar traces rescale bar widths on zoom causing bars to disappear —
-    # Scatter line segments are fixed in data coordinates and zoom-stable.
     dates = df["Date"].tolist()
     sv = spread.tolist()
 
+    # Compute half-bar width in ms for rectangle shapes (0.4 days)
+    half_ms = 0.4 * 86_400_000
+
+    fig = go.Figure()
+
+    # Add one invisible scatter per regime for the legend only
     for regime, color in REGIME_COLORS.items():
-        xs, ys = [], []
-        for i, r in enumerate(regimes):
-            if r == regime:
-                xs += [dates[i], dates[i], None]
-                ys += [0, sv[i], None]
-        if not xs:
+        if regime not in regimes:
             continue
         fig.add_trace(go.Scatter(
-            x=xs, y=ys,
-            mode="lines",
-            line=dict(color=color, width=2),
+            x=[None], y=[None],
+            mode="markers",
+            marker=dict(symbol="square", size=10, color=color),
             name=regime,
-            legendgroup=regime,
             showlegend=True,
-            hoverinfo="skip",
         ))
 
-    # Transparent scatter overlay for hover tooltips on every point
+    # Draw every bar as a filled shape rectangle — shapes are drawn in data
+    # coordinates and NEVER rescale on zoom, fixing the disappearing bar bug.
+    shapes = []
+    for i, (d, s, r) in enumerate(zip(dates, sv, regimes)):
+        color = REGIME_COLORS.get(r, "#9ca3af")
+        ts = d.timestamp() * 1000  # plotly datetime axis uses ms
+        shapes.append(dict(
+            type="rect",
+            xref="x", yref="y",
+            x0=d - pd.Timedelta(hours=9),
+            x1=d + pd.Timedelta(hours=9),
+            y0=0, y1=s,
+            fillcolor=color,
+            line_width=0,
+            opacity=1.0,
+        ))
+
+    # Transparent scatter for hover tooltips
     fig.add_trace(go.Scatter(
         x=dates, y=sv,
         mode="markers",
-        marker=dict(size=8, color=bar_colors, opacity=0),
+        marker=dict(size=6, color=[REGIME_COLORS.get(r,"#9ca3af") for r in regimes], opacity=0),
         showlegend=False,
         hovertemplate="<b>%{x|%b %d %Y}</b><br>Spread: %{y:.0f} bp<br>Regime: %{customdata}<extra></extra>",
         customdata=regimes,
     ))
 
-    # Zero line
-    fig.add_hline(y=0, line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
-
     fig.update_layout(
+        shapes=shapes,
         title=dict(text=title, font=dict(size=14)),
         height=300,
         margin=dict(l=50, r=20, t=40, b=40),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="left", x=0, font=dict(size=11),
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=11)),
         yaxis=dict(title="bp", ticksuffix=" bp"),
         xaxis=dict(showgrid=False),
         hovermode="x",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    # Zero line
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
+
 
 # ── Full yield curve snapshot ─────────────────────────────────────────────────
 def yield_curve_snapshot(df, tenors_available):
@@ -190,7 +200,7 @@ def yield_curve_snapshot(df, tenors_available):
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
 
 # ── Main app ──────────────────────────────────────────────────────────────────
 st.title("📈 US Treasury Yield Curve Dashboard")
