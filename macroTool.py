@@ -108,34 +108,45 @@ def spread_chart(df, short, long, title, lookback=60):
 
     fig = go.Figure()
 
-    # Single bar trace with per-bar colors — all bars always present on zoom
-    fig.add_trace(go.Bar(
-        x=df["Date"],
-        y=spread,
-        marker_color=bar_colors,
-        marker_line_width=0,
+    # Draw each bar as a vertical line segment using Scatter mode="lines".
+    # Bar traces rescale bar widths on zoom causing bars to disappear —
+    # Scatter line segments are fixed in data coordinates and zoom-stable.
+    dates = df["Date"].tolist()
+    sv = spread.tolist()
+
+    for regime, color in REGIME_COLORS.items():
+        xs, ys = [], []
+        for i, r in enumerate(regimes):
+            if r == regime:
+                xs += [dates[i], dates[i], None]
+                ys += [0, sv[i], None]
+        if not xs:
+            continue
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines",
+            line=dict(color=color, width=2),
+            name=regime,
+            legendgroup=regime,
+            showlegend=True,
+            hoverinfo="skip",
+        ))
+
+    # Transparent scatter overlay for hover tooltips on every point
+    fig.add_trace(go.Scatter(
+        x=dates, y=sv,
+        mode="markers",
+        marker=dict(size=8, color=bar_colors, opacity=0),
         showlegend=False,
         hovertemplate="<b>%{x|%b %d %Y}</b><br>Spread: %{y:.0f} bp<br>Regime: %{customdata}<extra></extra>",
         customdata=regimes,
     ))
-
-    # Invisible dummy traces just to drive the legend
-    for regime, color in REGIME_COLORS.items():
-        if regime in regimes:
-            fig.add_trace(go.Bar(
-                x=[None], y=[None],
-                name=regime,
-                marker_color=color,
-                showlegend=True,
-            ))
 
     # Zero line
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
-        barmode="overlay",
-        bargap=0.05,
         height=300,
         margin=dict(l=50, r=20, t=40, b=40),
         legend=dict(
