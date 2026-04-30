@@ -4,10 +4,8 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
-import time
 
-# --- 1. 配置与配对清单 ---
-# 定义我们想要监控的利差对 (Long End vs Short End)
+# --- 1. 配置清单 ---
 SPREAD_PAIRS = [
     ("USGG10YR Index", "USGG3M Index", "3M vs 10Y (衰退预警线)"),
     ("USGG10YR Index", "USGG2YR Index", "2Y vs 10Y (经典基准线)"),
@@ -16,27 +14,28 @@ SPREAD_PAIRS = [
     ("USGG10YR Index", "USGG5YR Index", "5Y vs 10Y (中段结构线)")
 ]
 
-# 雅虎实时数据映射 (用于缝合最新点)
+# 雅虎与本地 CSV 列名的映射关系
 YF_MAP = {
-    "USGG3M Index": "^IRX",   # 13周收益率
-    "USGG2YR Index": "^ZT=F",  # 2年期货(需注意换算，代码内已处理)
-    "USGG5YR Index": "^FVX",   # 5年收益率
-    "USGG10YR Index": "^TNX",  # 10年收益率
-    "USGG30YR Index": "^TYX"   # 30年收益率
+    "^IRX": "USGG3M Index",
+    "^ZT=F": "USGG2YR Index",
+    "^FVX": "USGG5YR Index",
+    "^TNX": "USGG10YR Index",
+    "^TYX": "USGG30YR Index"
 }
 
-st.set_page_config(page_title="全球宏观全期限色谱工作站", layout="wide")
+st.set_page_config(page_title="全球宏观色谱矩阵-智能补全版", layout="wide")
 
-# --- 2. 核心算法：彭博 6 状态逻辑 ---
+# --- 2. 核心算法：计算 Regime ---
 def calc_regime(df, long_col, short_col):
     df = df[[long_col, short_col]].copy()
-    df['Spread'] = (df[long_col] - df[short_col]) * 100 # 转为基点(Bps)
+    df['Spread'] = (df[long_col] - df[short_col]) * 100 # 转为基点
     df['d_s'] = df[short_col].diff()
     df['d_l'] = df[long_col].diff()
     df['d_spread'] = df['Spread'].diff()
 
     def get_color(row):
         ds, ds_s, ds_l = row['d_spread'], row['d_s'], row['d_l']
+        if pd.isna(ds): return (None, None)
         if ds > 0: # Steepening
             if ds_s < 0 and ds_l < 0: return ("Bull Steepener", "#00FF00")
             if ds_s > 0 and ds_l > 0: return ("Bear Steepener", "#FF8C00")
@@ -51,78 +50,92 @@ def calc_regime(df, long_col, short_col):
     df['Color'] = [x[1] if x else "gray" for x in res]
     return df
 
-# --- 3. 数据引擎 ---
-@st.cache_data(ttl=600)
-def fetch_and_stitch_data():
-    # A. 读取历史数据库
+# --- 3. 智能补全引擎 ---
+@st.cache_data(ttl=3600) # 缓存 1 小时，进入页面只抓一次
+def fetch_and_fill_data():
     try:
+        # A. 读取历史 CSV
         h_df = pd.read_csv("history_yields.csv", index_col='Date', parse_dates=True)
         h_df = h_df.sort_index()
+        last_date_in_csv = h_df.index[-1]
     except Exception as e:
-        st.error(f"无法读取 history_yields.csv，请检查文件名和格式。{e}")
-        return None, None
+        st.error(f"本地数据库读取失败: {e}")
+        return None
 
-    # B. 抓取雅虎实时点
-    yf_tickers = list(YF_MAP.values())
-    live = yf.download(yf_tickers, period="2d", progress=False)['Close'].ffill()
+    # B. 检查日期差，如果 CSV 数据不是今天的，则去雅虎补全
+    today_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # 校准 2Y (期货价格转收益率的估算，如果是收益率指数则直取)
-    # yfinance里^ZT=F有时是价格，这里我们假设CSV是百分比，做简单对齐
-    bj_now = datetime.now(timezone(timedelta(hours=8))).strftime('%H:%M:%S')
+    if last_date_in_csv < today_utc:
+        tickers = list(YF_MAP.keys())
+        # 从 CSV 最后日期的次日开始抓取
+        start_fetch = last_date_in_csv + timedelta(days=1)
+        new_data_raw = yf.download(tickers, start=start_fetch, progress=False)['Close']
+        
+        if not new_data_raw.empty:
+            # 统一列名：把 ^TNX 换回 USGG10YR Index 等
+            new_data_renamed = new_data_raw.rename(columns=YF_MAP)
+            # 合并历史与新抓取的数据
+            combined_df = pd.concat([h_df, new_data_renamed])
+            # 去重并排序
+            combined_df = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
+            # 填充可能存在的空值（如某天只有美债开市）
+            combined_df = combined_df.ffill()
+            return combined_df
     
-    return h_df, live, bj_now
+    return h_df
 
-# --- 4. UI 布局 ---
-st.title("🏛️ 全期限收益率曲线色谱矩阵 (Bloomberg复刻)")
+# --- 4. UI 渲染 ---
+st.title("🏛️ 全期限收益率曲线色谱矩阵 (智能补全版)")
 
 try:
-    h_df, live_data, update_time = fetch_and_stitch_data()
+    df_full = fetch_and_fill_data()
     
-    if h_df is not None:
-        st.write(f"最后同步: `{update_time}` | 数据源: 本地历史 + Yahoo实时")
+    if df_full is not None:
+        current_time = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+        st.write(f"**数据更新至:** `{df_full.index[-1].strftime('%Y-%m-%d')}` | **同步时间:** `{current_time}`")
+        st.write("🟢牛陡 | 🟠熊陡 | 💗扭曲陡 | 🔵牛平 | 🔴熊平 | 🟡扭曲平")
         
-        # 定义图例说明
-        st.write("🟢**牛陡** | 🟠**熊陡** | 💗**扭曲陡** | 🔵**牛平** | 🔴**熊平** | 🟡**扭曲平**")
-        
-        # 循环生成每一对利差的色谱图
         for long_end, short_end, title in SPREAD_PAIRS:
-            with st.container():
-                st.subheader(f"📊 {title}")
-                
-                # 计算该对的色谱
-                # 尝试把最新点拼进去
-                temp_df = h_df[[long_end, short_end]].copy()
-                
-                # 计算色谱
-                regime_df = calc_regime(temp_df, long_end, short_end)
-                
-                # 绘图
-                fig = go.Figure()
-                # 颜色背景柱
-                fig.add_trace(go.Bar(
-                    x=regime_df.index, y=regime_df['Spread'],
-                    marker_color=regime_df['Color'],
-                    marker_line_width=0, opacity=0.7,
-                    customdata=regime_df['Regime'],
-                    hovertemplate="日期: %{x}<br>利差: %{y:.1f} bps<br>状态: %{customdata}<extra></extra>"
-                ))
-                # 利差连线
-                fig.add_trace(go.Scatter(
-                    x=regime_df.index, y=regime_df['Spread'],
-                    line=dict(color='white', width=1.2),
-                    hoverinfo='skip'
-                ))
-                
-                fig.update_layout(
-                    height=400, template="plotly_dark", showlegend=False,
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    yaxis=dict(title="Spread (Bps)", zeroline=True, zerolinecolor='gray')
-                )
-                st.plotly_chart(fig, width="stretch", config={'responsive': True})
-                st.divider()
-
-    if st.sidebar.checkbox("自动刷新", value=True):
-        time.sleep(60); st.rerun()
+            if long_end in df_full.columns and short_end in df_full.columns:
+                with st.container():
+                    st.subheader(f"📊 {title}")
+                    
+                    # 计算色谱
+                    regime_df = calc_regime(df_full, long_end, short_end)
+                    
+                    fig = go.Figure()
+                    # 1. 颜色背景柱 (Bar)
+                    fig.add_trace(go.Bar(
+                        x=regime_df.index, y=regime_df['Spread'],
+                        marker_color=regime_df['Color'],
+                        marker_line_width=0, opacity=0.7,
+                        customdata=regime_df['Regime'],
+                        hovertemplate="日期: %{x}<br>利差: %{y:.1f} bps<br>状态: %{customdata}<extra></extra>"
+                    ))
+                    # 2. 利差连线 (Scatter)
+                    fig.add_trace(go.Scatter(
+                        x=regime_df.index, y=regime_df['Spread'],
+                        line=dict(color='white', width=1.5),
+                        hoverinfo='skip'
+                    ))
+                    
+                    # 布局设置：优化 Zoom 体验
+                    fig.update_layout(
+                        height=550, # 足够高，zoom 后不切顶
+                        template="plotly_dark",
+                        showlegend=False,
+                        margin=dict(l=10, r=10, t=30, b=30),
+                        yaxis=dict(
+                            title="Spread (Bps)", 
+                            zeroline=True, zerolinecolor='gray',
+                            autorange=True, fixedrange=False
+                        ),
+                        xaxis=dict(fixedrange=False),
+                        uirevision='constant' # 刷新不重置缩放
+                    )
+                    
+                    st.plotly_chart(fig, width="stretch", config={'responsive': True})
+                    st.divider()
 
 except Exception as e:
-    st.error(f"系统运行中... {e}")
+    st.error(f"正在准备数据，请稍候... (错误详情: {e})")
