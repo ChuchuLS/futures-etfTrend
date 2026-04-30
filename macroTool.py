@@ -237,7 +237,7 @@ if uploaded is None:
     st.stop()
 
 # Load all sheets once (cached by Streamlit)
-all_sheets = all_sheets  # already loaded above
+all_sheets = load_sheets(uploaded)
 
 # Derive yields dataframe from sheets
 _yields_raw = all_sheets.get("yields", list(all_sheets.values())[0] if all_sheets else pd.DataFrame())
