@@ -231,6 +231,104 @@ def yield_curve_snapshot(df, tenors_available):
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
 
+# ── Live data fetch ───────────────────────────────────────────────────────────
+
+# FRED series → our short yield column names
+FRED_SERIES = {
+    "DGS3MO": "3M",
+    "DGS1":   "12M",
+    "DGS2":   "2Y",
+    "DGS5":   "5Y",
+    "DGS10":  "10Y",
+    "DGS20":  "20Y",
+    "DGS30":  "30Y",
+}
+
+# yfinance tickers → column names matching our sheet columns
+# Yields:     use FRED instead (more accurate)
+# Metals:     GC=F (gold), SI=F (silver), HG=F (copper), PL=F (platinum), PA=F (palladium)
+# LME metals: no free source — skip, keep historical only
+# Energy:     CL=F (WTI crude), BZ=F (Brent), NG=F (nat gas)
+YF_METAL_MAP = {
+    "GC=F": "GC1",
+    "SI=F": "SI1",
+    "HG=F": "HG1",
+    "PL=F": "PL1",
+    "PA=F": "PA1",
+}
+YF_ENERGY_MAP = {
+    "CL=F": "CL1 COMB",
+    "BZ=F": "CO1",
+    "NG=F": "NG1",
+}
+
+@st.cache_data(ttl=3600)  # refresh every hour
+def fetch_fred_yields(start_date: str) -> pd.DataFrame:
+    """Fetch Treasury CMT yields from FRED (no API key needed for these series)."""
+    import urllib.request, json
+    base = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+    frames = {}
+    for series, col in FRED_SERIES.items():
+        try:
+            url = f"{base}{series}&vintage_date=9999-12-31"
+            with urllib.request.urlopen(url, timeout=10) as r:
+                import io as _io
+                raw = r.read().decode()
+            df = pd.read_csv(_io.StringIO(raw), parse_dates=["DATE"])
+            df = df.rename(columns={"DATE": "Date", series: col})
+            df = df[df["Date"] >= start_date]
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            frames[col] = df.set_index("Date")[col]
+        except Exception:
+            pass
+    if not frames:
+        return pd.DataFrame()
+    result = pd.DataFrame(frames).reset_index()
+    result = result.sort_values("Date").reset_index(drop=True)
+    result = result.ffill().bfill()
+    return result
+
+@st.cache_data(ttl=3600)
+def fetch_yf_prices(ticker_map: dict, start_date: str) -> pd.DataFrame:
+    """Fetch commodity/energy prices from yfinance."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return pd.DataFrame()
+    tickers = list(ticker_map.keys())
+    try:
+        raw = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
+        if raw.empty:
+            return pd.DataFrame()
+        # yfinance returns MultiIndex when multiple tickers
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.xs("Close", axis=1, level=0)
+        else:
+            close = raw[["Close"]].rename(columns={"Close": tickers[0]})
+        close = close.rename(columns=ticker_map)
+        close.index.name = "Date"
+        close = close.reset_index().sort_values("Date").reset_index(drop=True)
+        close = close.ffill().bfill()
+        return close
+    except Exception:
+        return pd.DataFrame()
+
+def merge_with_live(hist_df: pd.DataFrame, live_df: pd.DataFrame) -> pd.DataFrame:
+    """Append live rows that are newer than the last date in historical data."""
+    if live_df.empty or hist_df.empty:
+        return hist_df
+    last_hist = hist_df["Date"].max()
+    new_rows = live_df[live_df["Date"] > last_hist].copy()
+    if new_rows.empty:
+        return hist_df
+    # Only keep columns that exist in hist_df
+    common_cols = ["Date"] + [c for c in new_rows.columns if c in hist_df.columns and c != "Date"]
+    new_rows = new_rows[common_cols]
+    merged = pd.concat([hist_df, new_rows], ignore_index=True)
+    merged = merged.sort_values("Date").reset_index(drop=True)
+    merged = merged.ffill().bfill()
+    return merged
+
 # ── Main app ──────────────────────────────────────────────────────────────────
 st.title("📈 US Treasury Yield Curve Dashboard")
 
@@ -247,11 +345,29 @@ all_sheets = load_sheets(uploaded)
 _yields_raw = all_sheets.get("yields", list(all_sheets.values())[0] if all_sheets else pd.DataFrame())
 _rename = {"USGG2YR":"2Y","USGG10YR":"10Y","USGG30YR":"30Y",
            "USGG3M":"3M","USGG5YR":"5Y","USGG12M":"12M","USGG20YR":"20Y"}
-df = _yields_raw.rename(columns={k:v for k,v in _rename.items() if k in _yields_raw.columns})
+df_hist = _yields_raw.rename(columns={k:v for k,v in _rename.items() if k in _yields_raw.columns})
+metal_df_hist  = all_sheets.get("metal",  pd.DataFrame())
+energy_df_hist = all_sheets.get("energy", pd.DataFrame())
+
+# ── Live data top-up ──────────────────────────────────────────────────────────
+with st.spinner("Fetching latest market data…"):
+    _yield_start  = str(df_hist["Date"].max().date()) if not df_hist.empty else "2020-01-01"
+    _metal_start  = str(metal_df_hist["Date"].max().date()) if not metal_df_hist.empty else "2020-01-01"
+    _energy_start = str(energy_df_hist["Date"].max().date()) if not energy_df_hist.empty else "2020-01-01"
+
+    live_yields = fetch_fred_yields(_yield_start)
+    live_metals = fetch_yf_prices(YF_METAL_MAP,  _metal_start)
+    live_energy = fetch_yf_prices(YF_ENERGY_MAP, _energy_start)
+
+df        = merge_with_live(df_hist,         live_yields)
+metal_df  = merge_with_live(metal_df_hist,   live_metals)
+energy_df = merge_with_live(energy_df_hist,  live_energy)
+
 tenors = [c for c in ["3M","12M","2Y","5Y","10Y","20Y","30Y"] if c in df.columns]
 
-metal_df  = all_sheets.get("metal",  pd.DataFrame())
-energy_df = all_sheets.get("energy", pd.DataFrame())
+# Status banner
+_last = df["Date"].max().strftime("%b %d, %Y") if not df.empty else "?"
+st.caption(f"Yield data through **{_last}** (FRED live top-up) · Commodities via yfinance")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_yield, tab_comm, tab_corr = st.tabs(["📈 Yield Curve", "📦 Commodities & Energy", "🔗 Correlation"])
