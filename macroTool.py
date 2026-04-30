@@ -104,21 +104,30 @@ def spread_chart(df, short, long, title, lookback=60):
 
     spread = (df[long] - df[short]) * 100  # in bps
     regimes = add_regimes(df, f"{short}{long}", short, long, lookback)
+    bar_colors = [REGIME_COLORS[r] for r in regimes]
 
     fig = go.Figure()
 
-    # One bar trace per regime so legend works
+    # Single bar trace with per-bar colors — all bars always present on zoom
+    fig.add_trace(go.Bar(
+        x=df["Date"],
+        y=spread,
+        marker_color=bar_colors,
+        marker_line_width=0,
+        showlegend=False,
+        hovertemplate="<b>%{x|%b %d %Y}</b><br>Spread: %{y:.0f} bp<br>Regime: %{customdata}<extra></extra>",
+        customdata=regimes,
+    ))
+
+    # Invisible dummy traces just to drive the legend
     for regime, color in REGIME_COLORS.items():
-        mask = [r == regime for r in regimes]
-        if not any(mask):
-            continue
-        fig.add_trace(go.Bar(
-            x=df["Date"][mask],
-            y=spread[mask],
-            name=regime,
-            marker_color=color,
-            showlegend=True,
-        ))
+        if regime in regimes:
+            fig.add_trace(go.Bar(
+                x=[None], y=[None],
+                name=regime,
+                marker_color=color,
+                showlegend=True,
+            ))
 
     # Zero line
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
@@ -135,7 +144,7 @@ def spread_chart(df, short, long, title, lookback=60):
         ),
         yaxis=dict(title="bp", ticksuffix=" bp"),
         xaxis=dict(showgrid=False),
-        hovermode="x unified",
+        hovermode="x",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
