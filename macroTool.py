@@ -193,7 +193,7 @@ def spread_chart(df, short, long, title, lookback=60):
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=11)),
         yaxis=dict(title="bp", ticksuffix=" bp"),
-        xaxis=dict(type="date", showgrid=False),
+        xaxis=dict(type="date", showgrid=False, rangebreaks=[dict(bounds=["sat","mon"])]),
         hovermode="x",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -451,22 +451,40 @@ with tab_comm:
         palette = ["#378ADD","#1D9E75","#D85A30","#9F77DD","#E8A838",
                    "#E05C8A","#4ade80","#f87171","#60a5fa","#facc15","#fb923c","#c084fc"]
         fig = go.Figure()
+        # Separate axes for NG1 (very different scale) vs oil prices
+        ng_cols  = [c for c in available if "NG" in c]
+        main_cols = [c for c in available if c not in ng_cols]
         for i, col in enumerate(available):
             y = dff[col].copy()
             if normalize:
                 base = y.iloc[0] if y.iloc[0] != 0 else 1
                 y = (y / base - 1) * 100
-            fig.add_trace(go.Scatter(x=dff["Date"], y=y, name=col, mode="lines",
-                                     line=dict(width=1.5, color=palette[i % len(palette)])))
-        fig.update_layout(
+            use_y2 = (col in ng_cols and main_cols and not normalize)
+            fig.add_trace(go.Scatter(
+                x=dff["Date"], y=y, name=col, mode="lines",
+                line=dict(width=1.5, color=palette[i % len(palette)]),
+                yaxis="y2" if use_y2 else "y",
+            ))
+        yaxis2_cfg = dict(
+            title="NG1 Price", overlaying="y", side="right",
+            showgrid=False, tickfont=dict(size=10),
+        ) if (ng_cols and main_cols and not normalize) else {}
+        layout_kw = dict(
             title=dict(text=title, font=dict(size=13)), height=280,
-            margin=dict(l=50, r=20, t=36, b=36),
+            margin=dict(l=50, r=60, t=36, b=36),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=10)),
-            yaxis=dict(title="% change from start" if normalize else "Price"),
-            xaxis=dict(type="date", showgrid=False),
+            yaxis=dict(title="% change" if normalize else "Price", showgrid=True),
+            xaxis=dict(
+                type="date", showgrid=False,
+                # Remove weekend/holiday gaps
+                rangebreaks=[dict(bounds=["sat","mon"])],
+            ),
             hovermode="x unified",
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         )
+        if yaxis2_cfg:
+            layout_kw["yaxis2"] = yaxis2_cfg
+        fig.update_layout(**layout_kw)
         st.plotly_chart(fig, use_container_width=True)
 
     if metal_df.empty and energy_df.empty:
@@ -492,7 +510,7 @@ with tab_corr:
     st.sidebar.header("Correlation Settings")
     corr_window = st.sidebar.selectbox("Window", ["1M (21d)","3M (63d)","6M (126d)"], index=1, key="corr_win")
     corr_period = st.sidebar.selectbox("History", ["1Y","2Y","5Y","All"], index=1, key="corr_period")
-    win_map = {"1M (21d)":21,"3M (63d)":63,"6M (126d)":126}
+    win_map   = {"1M (21d)":21,"3M (63d)":63,"6M (126d)":126}
     window    = win_map[corr_window]
     corr_days = {"1Y":365,"2Y":730,"5Y":1825,"All":99999}[corr_period]
 
@@ -512,63 +530,86 @@ with tab_corr:
             unified = unified.join(f, how="outer")
         return unified.sort_index().ffill().bfill()
 
-    unified = build_unified(all_sheets, corr_days)
+    unified    = build_unified(all_sheets, corr_days)
+    all_assets = list(unified.columns) if not unified.empty else []
+    short_name = lambda c: c.split(":")[-1]
 
     if unified.empty:
         st.info("No data available for correlation.")
     else:
-        all_assets = list(unified.columns)
+        # ── Rolling correlation line chart ────────────────────────────────────
+        st.subheader("Rolling correlation")
         col_a, col_b = st.columns(2)
         default_a = next((c for c in all_assets if "10Y" in c), all_assets[0])
-        default_b = next((c for c in all_assets if "GC1" in c or "CL1" in c), all_assets[min(1, len(all_assets)-1)])
-        asset_a = col_a.selectbox("Asset A", all_assets, index=all_assets.index(default_a), key="ca")
-        asset_b = col_b.selectbox("Asset B", all_assets, index=all_assets.index(default_b), key="cb")
+        default_b = next((c for c in all_assets if "GC1" in c or "CL1" in c), all_assets[min(1,len(all_assets)-1)])
+        asset_a = col_a.selectbox("Asset A", all_assets,
+                                  format_func=short_name,
+                                  index=all_assets.index(default_a), key="ca")
+        asset_b = col_b.selectbox("Asset B", all_assets,
+                                  format_func=short_name,
+                                  index=all_assets.index(default_b), key="cb")
 
         if asset_a != asset_b:
-            rets = unified[[asset_a, asset_b]].pct_change().dropna()
+            rets         = unified[[asset_a, asset_b]].pct_change().dropna()
             rolling_corr = rets[asset_a].rolling(window).corr(rets[asset_b]).dropna()
-            colors = ["#1D9E75" if v >= 0 else "#D85A30" for v in rolling_corr]
 
+            # FIX 1: Line chart instead of bar chart
             fig = go.Figure()
-            fig.add_trace(go.Bar(
+            fig.add_trace(go.Scatter(
                 x=rolling_corr.index, y=rolling_corr.values,
-                marker=dict(color=colors, line_width=0),
-                width=int(0.7 * 86_400_000), showlegend=False,
+                mode="lines", line=dict(width=1.8, color="#378ADD"),
+                fill="tozeroy",
+                fillcolor="rgba(55,138,221,0.12)",
                 hovertemplate="<b>%{x|%b %d %Y}</b><br>Corr: %{y:.3f}<extra></extra>",
             ))
             fig.add_hline(y=0,    line_dash="dash", line_color="rgba(150,150,150,0.5)", line_width=1)
-            fig.add_hline(y=0.7,  line_dash="dot",  line_color="rgba(29,158,117,0.4)",  line_width=1)
-            fig.add_hline(y=-0.7, line_dash="dot",  line_color="rgba(216,90,48,0.4)",   line_width=1)
+            fig.add_hline(y=0.7,  line_dash="dot",  line_color="rgba(29,158,117,0.5)",  line_width=1)
+            fig.add_hline(y=-0.7, line_dash="dot",  line_color="rgba(216,90,48,0.5)",   line_width=1)
             fig.update_layout(
-                title=dict(text=f"Rolling {corr_window}: {asset_a} vs {asset_b}", font=dict(size=13)),
-                height=300, margin=dict(l=50, r=20, t=40, b=36),
-                yaxis=dict(title="Correlation", range=[-1.05, 1.05], tickformat=".2f"),
-                xaxis=dict(type="date", showgrid=False),
-                hovermode="x",
+                title=dict(text=f"Rolling {corr_window}: {short_name(asset_a)} vs {short_name(asset_b)}", font=dict(size=13)),
+                height=280, margin=dict(l=50, r=20, t=40, b=36),
+                yaxis=dict(title="Correlation", range=[-1.05, 1.05], tickformat=".2f", zeroline=False),
+                xaxis=dict(type="date", showgrid=False,
+                           rangebreaks=[dict(bounds=["sat","mon"])]),
+                hovermode="x unified",
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader(f"Current {corr_window} correlation matrix")
-            rets_all     = unified.pct_change().dropna().iloc[-window:]
-            corr_matrix  = rets_all.corr()
-            short_labels = [c.split(":")[-1] for c in corr_matrix.columns]
-            z = corr_matrix.values.round(2).tolist()
+        st.divider()
+
+        # ── Correlation heatmap with asset picker ─────────────────────────────
+        st.subheader(f"Correlation matrix — {corr_window}")
+        all_short  = [short_name(c) for c in all_assets]
+        default_sel = all_short  # all selected by default
+        selected_short = st.multiselect(
+            "Select assets to include",
+            options=all_short,
+            default=default_sel,
+            key="heatmap_assets",
+        )
+
+        if len(selected_short) >= 2:
+            sel_full   = [c for c in all_assets if short_name(c) in selected_short]
+            rets_all   = unified[sel_full].pct_change().dropna().iloc[-window:]
+            corr_m     = rets_all.corr()
+            labels     = [short_name(c) for c in corr_m.columns]
+            z          = corr_m.values.round(2).tolist()
 
             heat = go.Figure(go.Heatmap(
-                z=z, x=short_labels, y=short_labels,
+                z=z, x=labels, y=labels,
                 colorscale="RdBu", zmid=0, zmin=-1, zmax=1,
                 text=[[f"{v:.2f}" for v in row] for row in z],
                 texttemplate="%{text}", textfont=dict(size=9),
                 showscale=True, colorbar=dict(thickness=12, len=0.8),
             ))
             heat.update_layout(
-                height=max(350, len(short_labels)*28 + 80),
+                height=max(350, len(labels)*30 + 100),
                 margin=dict(l=80, r=20, t=20, b=80),
                 xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
-                yaxis=dict(tickfont=dict(size=10)),
+                yaxis=dict(tickfont=dict(size=10), autorange="reversed"),
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(heat, use_container_width=True)
         else:
-            st.info("Select two different assets to compute correlation.")
+            st.info("Select at least 2 assets to show the matrix.")
