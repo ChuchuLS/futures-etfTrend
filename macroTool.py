@@ -76,9 +76,12 @@ def clean_sheet(df: pd.DataFrame) -> pd.DataFrame:
     """Standardise a single sheet: strip column names, parse Date, ffill blanks, sort."""
     df = df.copy()
     df.columns = df.columns.str.strip()
-    df["Date"] = pd.to_datetime(df["Date"])
+    # Find the date column (first column or one named Date)
+    if "Date" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
-    # Forward-fill then back-fill so no NaN gaps remain
     num_cols = df.select_dtypes(include="number").columns
     df[num_cols] = df[num_cols].ffill().bfill()
     return df
@@ -87,36 +90,38 @@ def shorten(col: str) -> str:
     """Strip Bloomberg suffix from column name."""
     return col.replace(" Comdty", "").replace(" Index", "").strip()
 
-def load_all_sheets(file) -> dict:
-    """Return dict of {sheet_name: DataFrame} for all sheets found."""
+@st.cache_data
+def load_sheets(file) -> dict:
+    """Return dict of {sheet_name: DataFrame}. Reads file bytes once to avoid buffer exhaustion."""
+    import io
+    raw = file.read()          # read once into bytes
     name = file.name.lower()
     sheets = {}
+
     if name.endswith(".csv"):
-        df = pd.read_csv(file)
-        df.columns = df.columns.str.strip()
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date").reset_index(drop=True)
+        df = pd.read_csv(io.BytesIO(raw))
+        df = clean_sheet(df)
+        df.columns = [shorten(c) if c != "Date" else c for c in df.columns]
         sheets["yields"] = df
     else:
-        xl = pd.ExcelFile(file)
+        xl = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
         for sheet in xl.sheet_names:
             try:
                 df = xl.parse(sheet)
-                if "Date" not in df.columns and df.columns[0] != "Date":
-                    df = df.rename(columns={df.columns[0]: "Date"})
+                if df.empty:
+                    continue
                 df = clean_sheet(df)
-                # Shorten Bloomberg column names
                 df.columns = [shorten(c) if c != "Date" else c for c in df.columns]
                 sheets[sheet] = df
-            except Exception:
-                pass
+            except Exception as e:
+                st.warning(f"Could not parse sheet '{sheet}': {e}")
     return sheets
 
 @st.cache_data
 def load_data(file) -> pd.DataFrame:
-    """Legacy: return yields sheet only, renamed for backward compat."""
-    sheets = load_all_sheets(file)
-    df = sheets.get("yields", list(sheets.values())[0])
+    """Return yields sheet only, with short tenor column names."""
+    sheets = load_sheets(file)
+    df = sheets.get("yields", list(sheets.values())[0] if sheets else pd.DataFrame())
     rename = {
         "USGG2YR":  "2Y", "USGG10YR": "10Y", "USGG30YR": "30Y",
         "USGG3M":   "3M", "USGG5YR":  "5Y",  "USGG12M":  "12M",
@@ -124,10 +129,6 @@ def load_data(file) -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
     return df
-
-@st.cache_data
-def load_sheets(file) -> dict:
-    return load_all_sheets(file)
 
 # ── Spread chart builder ──────────────────────────────────────────────────────
 def spread_chart(df, short, long, title, lookback=60):
@@ -235,7 +236,14 @@ if uploaded is None:
     st.info("Upload your file to get started. Expected columns: Date, USGG2YR Index, USGG10YR Index, USGG30YR Index (and optionally 3M, 5Y, 12M, 20Y).")
     st.stop()
 
-df = load_data(uploaded)
+# Load all sheets once (cached by Streamlit)
+all_sheets = all_sheets  # already loaded above
+
+# Derive yields dataframe from sheets
+_yields_raw = all_sheets.get("yields", list(all_sheets.values())[0] if all_sheets else pd.DataFrame())
+_rename = {"USGG2YR":"2Y","USGG10YR":"10Y","USGG30YR":"30Y",
+           "USGG3M":"3M","USGG5YR":"5Y","USGG12M":"12M","USGG20YR":"20Y"}
+df = _yields_raw.rename(columns={k:v for k,v in _rename.items() if k in _yields_raw.columns})
 tenors = [c for c in ["3M","12M","2Y","5Y","10Y","20Y","30Y"] if c in df.columns]
 
 # ── Sidebar controls ──────────────────────────────────────────────────────────
@@ -303,7 +311,7 @@ with st.expander("View raw data"):
 st.divider()
 st.header("📦 Commodities & Energy — Long-term Trend")
 
-sheets = load_sheets(uploaded)
+sheets = all_sheets  # already loaded above
 
 METAL_GROUPS = {
     "Precious Metals":  ["GC1", "SI1", "PL1", "PA1"],
