@@ -35,7 +35,7 @@ REGIME_COLORS = {
     "Unchanged":       "#9ca3af",
 }
 
-def classify_regime(curve, curve_lb, y_short, y_short_lb, y_long, y_long_lb, eps=0.01):
+def classify_regime(curve, curve_lb, y_short, y_short_lb, y_long, y_long_lb, eps=0.001):
     steep = curve > curve_lb + eps
     flat  = curve < curve_lb - eps
     s_up  = y_short > y_short_lb + eps
@@ -188,7 +188,6 @@ def spread_chart(df, short, long, title, lookback=60):
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
         barmode="overlay",
-        height=300,
         margin=dict(l=50, r=20, t=40, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=11)),
@@ -198,7 +197,7 @@ def spread_chart(df, short, long, title, lookback=60):
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 # ── Full yield curve snapshot ─────────────────────────────────────────────────
 def yield_curve_snapshot(df, tenors_available):
@@ -220,7 +219,6 @@ def yield_curve_snapshot(df, tenors_available):
                              mode="lines+markers", name=str(wk_ago["Date"].date()) + " (1wk ago)",
                              line=dict(color="#9ca3af", width=1, dash="dash"), marker=dict(size=5)))
     fig.update_layout(
-        height=280,
         margin=dict(l=50, r=20, t=30, b=40),
         yaxis=dict(title="Yield (%)", tickformat=".2f"),
         xaxis=dict(title="Tenor"),
@@ -229,7 +227,7 @@ def yield_curve_snapshot(df, tenors_available):
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': True})
 
 # ── Live data fetch ───────────────────────────────────────────────────────────
 
@@ -378,7 +376,7 @@ tab_yield, tab_comm, tab_corr = st.tabs(["📈 Yield Curve", "📦 Commodities &
 with tab_yield:
     st.sidebar.header("Yield Settings")
     period = st.sidebar.selectbox("Period", ["1Y", "2Y", "5Y", "10Y", "All"], index=2)
-    lookback_weeks = st.sidebar.slider("Regime lookback (weeks)", 4, 26, 12)
+    lookback_weeks = st.sidebar.slider("Regime lookback (weeks)", 1, 52, 12)
     lookback = lookback_weeks * 5
 
     period_map = {"1Y": 252, "2Y": 504, "5Y": 1260, "10Y": 2520, "All": len(df)}
@@ -423,7 +421,7 @@ with tab_yield:
 
     with st.expander("View raw data"):
         st.dataframe(df_view[["Date"] + tenors].set_index("Date").sort_index(ascending=False),
-                     use_container_width=True)
+                     width='stretch')
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 2 — COMMODITIES & ENERGY
@@ -470,7 +468,7 @@ with tab_comm:
             showgrid=False, tickfont=dict(size=10),
         ) if (ng_cols and main_cols and not normalize) else {}
         layout_kw = dict(
-            title=dict(text=title, font=dict(size=13)), height=280,
+            title=dict(text=title, font=dict(size=13)),
             margin=dict(l=50, r=60, t=36, b=36),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=10)),
             yaxis=dict(title="% change" if normalize else "Price", showgrid=True),
@@ -485,7 +483,7 @@ with tab_comm:
         if yaxis2_cfg:
             layout_kw["yaxis2"] = yaxis2_cfg
         fig.update_layout(**layout_kw)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     if metal_df.empty and energy_df.empty:
         st.info("No 'metal' or 'energy' sheets found in the uploaded file.")
@@ -567,14 +565,14 @@ with tab_corr:
             fig.add_hline(y=-0.7, line_dash="dot",  line_color="rgba(216,90,48,0.5)",   line_width=1)
             fig.update_layout(
                 title=dict(text=f"Rolling {corr_window}: {short_name(asset_a)} vs {short_name(asset_b)}", font=dict(size=13)),
-                height=280, margin=dict(l=50, r=20, t=40, b=36),
+                margin=dict(l=50, r=20, t=40, b=36),
                 yaxis=dict(title="Correlation", range=[-1.05, 1.05], tickformat=".2f", zeroline=False),
                 xaxis=dict(type="date", showgrid=False,
                            rangebreaks=[dict(bounds=["sat","mon"])]),
                 hovermode="x unified",
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         st.divider()
 
@@ -604,12 +602,12 @@ with tab_corr:
                 showscale=True, colorbar=dict(thickness=12, len=0.8),
             ))
             heat.update_layout(
-                height=max(350, len(labels)*30 + 100),
+                height=max(500, len(labels)*36 + 120),
                 margin=dict(l=80, r=20, t=20, b=80),
                 xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
                 yaxis=dict(tickfont=dict(size=10), autorange="reversed"),
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
-            st.plotly_chart(heat, use_container_width=True)
+            st.plotly_chart(heat, width='stretch')
         else:
             st.info("Select at least 2 assets to show the matrix.")
