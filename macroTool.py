@@ -90,11 +90,48 @@ def shorten(col: str) -> str:
     """Strip Bloomberg suffix from column name."""
     return col.replace(" Comdty", "").replace(" Index", "").strip()
 
+# ── Column group definitions ──────────────────────────────────────────────────
+YIELD_COLS_BBG = ["USGG10YR","USGG3M","USGG2YR","USGG5YR","USGG30YR","USGG12M","USGG20YR"]
+YIELD_RENAME   = {"USGG2YR":"2Y","USGG10YR":"10Y","USGG30YR":"30Y",
+                  "USGG3M":"3M","USGG5YR":"5Y","USGG12M":"12M","USGG20YR":"20Y"}
+
+METAL_COLS     = ["GC1 COMB","SI1","HG1","PL1","PA1",
+                  "LMCADS03","LMAHDS03","LMZSDS03","LMPBDS03","LMNIDS03","LMSNDS03"]
+ENERGY_COLS    = ["CO1","CL1","NG1"]
+SOFTS_COLS     = ["C 1 COMB","S 1","W 1","SM1","BO1","O 1",
+                  "SB1","KC1","CT1","CC1","JO1","LC1","LH1","FC1","KO1","JN1","RS1"]
+SOFTS_NAMES    = {
+    "C 1 COMB":"Corn","S 1":"Soybeans","W 1":"Wheat","SM1":"Soybean Meal",
+    "BO1":"Soybean Oil","O 1":"Oats","SB1":"Sugar","KC1":"Coffee",
+    "CT1":"Cotton","CC1":"Cocoa","JO1":"OJ","LC1":"Live Cattle",
+    "LH1":"Lean Hogs","FC1":"Feeder Cattle","KO1":"Palm Oil",
+    "JN1":"Rubber","RS1":"Canola",
+}
+
+def split_into_sheets(df: pd.DataFrame) -> dict:
+    """Split a wide single-sheet DataFrame into logical sub-DataFrames by column group."""
+    sheets = {}
+    def extract(cols):
+        avail = [c for c in cols if c in df.columns]
+        if avail:
+            return df[["Date"] + avail].copy().dropna(subset=avail, how="all")
+        return pd.DataFrame()
+
+    y = extract(YIELD_COLS_BBG)
+    if not y.empty:
+        y = y.rename(columns=YIELD_RENAME)
+        sheets["yields"] = y
+
+    m = extract(METAL_COLS);  sheets["metal"]  = m  if not m.empty  else pd.DataFrame()
+    e = extract(ENERGY_COLS); sheets["energy"] = e  if not e.empty  else pd.DataFrame()
+    s = extract(SOFTS_COLS);  sheets["softs"]  = s  if not s.empty  else pd.DataFrame()
+    return {k: v for k, v in sheets.items() if not v.empty}
+
 @st.cache_data
 def load_sheets(file) -> dict:
-    """Return dict of {sheet_name: DataFrame}. Reads file bytes once to avoid buffer exhaustion."""
+    """Return dict of {sheet_name: DataFrame}. Reads file bytes once."""
     import io
-    raw = file.read()          # read once into bytes
+    raw  = file.read()
     name = file.name.lower()
     sheets = {}
 
@@ -102,9 +139,8 @@ def load_sheets(file) -> dict:
         df = pd.read_csv(io.BytesIO(raw))
         df = clean_sheet(df)
         df.columns = [shorten(c) if c != "Date" else c for c in df.columns]
-        sheets["yields"] = df
+        sheets = split_into_sheets(df) or {"yields": df}
     else:
-        # Try openpyxl first (.xlsx), fall back to xlrd (.xls)
         try:
             xl = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
         except Exception:
@@ -119,20 +155,25 @@ def load_sheets(file) -> dict:
                 sheets[sheet] = df
             except Exception as e:
                 st.warning(f"Could not parse sheet '{sheet}': {e}")
+
+        # If only one sheet, split it by column group
+        if len(sheets) == 1:
+            only = list(sheets.values())[0]
+            split = split_into_sheets(only)
+            if len(split) > 1:
+                sheets = split
+
+    # Ensure yields columns are renamed to short names
+    if "yields" in sheets:
+        sheets["yields"] = sheets["yields"].rename(
+            columns={k:v for k,v in YIELD_RENAME.items() if k in sheets["yields"].columns})
     return sheets
 
 @st.cache_data
 def load_data(file) -> pd.DataFrame:
-    """Return yields sheet only, with short tenor column names."""
+    """Return yields sheet only (already renamed to short names by load_sheets)."""
     sheets = load_sheets(file)
-    df = sheets.get("yields", list(sheets.values())[0] if sheets else pd.DataFrame())
-    rename = {
-        "USGG2YR":  "2Y", "USGG10YR": "10Y", "USGG30YR": "30Y",
-        "USGG3M":   "3M", "USGG5YR":  "5Y",  "USGG12M":  "12M",
-        "USGG20YR": "20Y",
-    }
-    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-    return df
+    return sheets.get("yields", list(sheets.values())[0] if sheets else pd.DataFrame())
 
 # ── Spread chart builder ──────────────────────────────────────────────────────
 def spread_chart(df, short, long, title, lookback=60):
@@ -255,35 +296,67 @@ YF_METAL_MAP = {
     "PA=F": "PA1",
 }
 YF_ENERGY_MAP = {
-    "CL=F": "CL1 COMB",
+    "CL=F": "CL1",
     "BZ=F": "CO1",
     "NG=F": "NG1",
 }
+# Soft commodities — yfinance futures tickers
+YF_SOFTS_MAP = {
+    "ZC=F": "C 1 COMB",   # Corn
+    "ZS=F": "S 1",         # Soybeans
+    "ZW=F": "W 1",         # Wheat
+    "ZM=F": "SM1",         # Soybean Meal
+    "ZL=F": "BO1",         # Soybean Oil
+    "ZO=F": "O 1",         # Oats
+    "SB=F": "SB1",         # Sugar #11
+    "KC=F": "KC1",         # Coffee
+    "CT=F": "CT1",         # Cotton
+    "CC=F": "CC1",         # Cocoa
+    "OJ=F": "JO1",         # OJ
+    "LE=F": "LC1",         # Live Cattle
+    "HE=F": "LH1",         # Lean Hogs
+    "GF=F": "FC1",         # Feeder Cattle
+}
 
 @st.cache_data(ttl=3600)  # refresh every hour
+@st.cache_data(ttl=3600)
 def fetch_fred_yields(start_date: str) -> pd.DataFrame:
-    """Fetch Treasury CMT yields from FRED (no API key needed for these series)."""
-    import urllib.request, json
+    """Fetch Treasury CMT yields from FRED public CSV (no API key needed).
+    start_date: pull from 7 days before this date to ensure overlap with hist data.
+    """
+    import urllib.request, io as _io
+    from datetime import datetime, timedelta
+    # Go back 7 days to guarantee we catch any FRED reporting lag
+    fetch_from = (pd.to_datetime(start_date) - timedelta(days=7)).strftime("%Y-%m-%d")
     base = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
     frames = {}
+    errors = []
     for series, col in FRED_SERIES.items():
         try:
-            url = f"{base}{series}&vintage_date=9999-12-31"
-            with urllib.request.urlopen(url, timeout=10) as r:
-                import io as _io
+            url = f"{base}{series}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
                 raw = r.read().decode()
-            df = pd.read_csv(_io.StringIO(raw), parse_dates=["DATE"])
-            df = df.rename(columns={"DATE": "Date", series: col})
-            df = df[df["Date"] >= start_date]
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = pd.read_csv(_io.StringIO(raw))
+            # FRED CSV has columns: DATE, <series_id>
+            df.columns = ["Date", col]
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df[col]    = pd.to_numeric(df[col], errors="coerce")  # "." → NaN
+            df = df.dropna(subset=["Date"])
+            df = df[df["Date"] >= fetch_from]
             frames[col] = df.set_index("Date")[col]
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"{series}: {e}")
+    if errors:
+        st.caption(f"⚠️ FRED fetch issues: {'; '.join(errors[:3])}")
     if not frames:
         return pd.DataFrame()
     result = pd.DataFrame(frames).reset_index()
     result = result.sort_values("Date").reset_index(drop=True)
-    result = result.ffill().bfill()
+    # Drop rows where all yield cols are NaN (FRED uses "." for missing)
+    yield_cols = [c for c in result.columns if c != "Date"]
+    result = result.dropna(subset=yield_cols, how="all")
+    result[yield_cols] = result[yield_cols].ffill().bfill()
     return result
 
 @st.cache_data(ttl=3600)
@@ -293,14 +366,16 @@ def fetch_yf_prices(ticker_map: dict, start_date: str) -> pd.DataFrame:
         import yfinance as yf
     except ImportError:
         return pd.DataFrame()
+    from datetime import timedelta
+    # Pull from 7 days before last hist date to ensure overlap
+    fetch_from = (pd.to_datetime(start_date) - timedelta(days=7)).strftime("%Y-%m-%d")
     tickers = list(ticker_map.keys())
     try:
-        raw = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
+        raw = yf.download(tickers, start=fetch_from, auto_adjust=True, progress=False)
         if raw.empty:
             return pd.DataFrame()
-        # yfinance returns MultiIndex when multiple tickers
         if isinstance(raw.columns, pd.MultiIndex):
-            close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw.xs("Close", axis=1, level=0)
+            close = raw.xs("Close", axis=1, level=0)
         else:
             close = raw[["Close"]].rename(columns={"Close": tickers[0]})
         close = close.rename(columns=ticker_map)
@@ -308,14 +383,18 @@ def fetch_yf_prices(ticker_map: dict, start_date: str) -> pd.DataFrame:
         close = close.reset_index().sort_values("Date").reset_index(drop=True)
         close = close.ffill().bfill()
         return close
-    except Exception:
+    except Exception as e:
+        st.caption(f"⚠️ yfinance fetch issue: {e}")
         return pd.DataFrame()
 
 def merge_with_live(hist_df: pd.DataFrame, live_df: pd.DataFrame) -> pd.DataFrame:
-    """Append live rows that are newer than the last date in historical data."""
-    if live_df.empty or hist_df.empty:
+    """Merge live data: update overlapping dates + append newer rows."""
+    if live_df.empty:
         return hist_df
+    if hist_df.empty:
+        return live_df
     last_hist = hist_df["Date"].max()
+    # Only take rows strictly newer than history
     new_rows = live_df[live_df["Date"] > last_hist].copy()
     if new_rows.empty:
         return hist_df
@@ -339,13 +418,11 @@ if uploaded is None:
 # Load all sheets once (cached by Streamlit)
 all_sheets = load_sheets(uploaded)
 
-# Derive yields dataframe from sheets
-_yields_raw = all_sheets.get("yields", list(all_sheets.values())[0] if all_sheets else pd.DataFrame())
-_rename = {"USGG2YR":"2Y","USGG10YR":"10Y","USGG30YR":"30Y",
-           "USGG3M":"3M","USGG5YR":"5Y","USGG12M":"12M","USGG20YR":"20Y"}
-df_hist = _yields_raw.rename(columns={k:v for k,v in _rename.items() if k in _yields_raw.columns})
+# Derive per-group DataFrames from sheets (already split & renamed by load_sheets)
+df_hist        = all_sheets.get("yields", pd.DataFrame())
 metal_df_hist  = all_sheets.get("metal",  pd.DataFrame())
 energy_df_hist = all_sheets.get("energy", pd.DataFrame())
+softs_df_hist  = all_sheets.get("softs",  pd.DataFrame())
 
 # ── Live data top-up ──────────────────────────────────────────────────────────
 with st.spinner("Fetching latest market data…"):
@@ -353,19 +430,34 @@ with st.spinner("Fetching latest market data…"):
     _metal_start  = str(metal_df_hist["Date"].max().date()) if not metal_df_hist.empty else "2020-01-01"
     _energy_start = str(energy_df_hist["Date"].max().date()) if not energy_df_hist.empty else "2020-01-01"
 
+    _softs_start  = str(softs_df_hist["Date"].max().date()) if not softs_df_hist.empty else "2020-01-01"
     live_yields = fetch_fred_yields(_yield_start)
     live_metals = fetch_yf_prices(YF_METAL_MAP,  _metal_start)
     live_energy = fetch_yf_prices(YF_ENERGY_MAP, _energy_start)
+    live_softs  = fetch_yf_prices(YF_SOFTS_MAP,  _softs_start)
 
-df        = merge_with_live(df_hist,         live_yields)
-metal_df  = merge_with_live(metal_df_hist,   live_metals)
-energy_df = merge_with_live(energy_df_hist,  live_energy)
+df        = merge_with_live(df_hist,        live_yields)
+metal_df  = merge_with_live(metal_df_hist,  live_metals)
+energy_df = merge_with_live(energy_df_hist, live_energy)
+softs_df  = merge_with_live(softs_df_hist,  live_softs)
 
 tenors = [c for c in ["3M","12M","2Y","5Y","10Y","20Y","30Y"] if c in df.columns]
 
-# Status banner
-_last = df["Date"].max().strftime("%b %d, %Y") if not df.empty else "?"
-st.caption(f"Yield data through **{_last}** (FRED live top-up) · Commodities via yfinance")
+# Status banner — show last date per data source
+_y_last  = df["Date"].max().strftime("%b %d, %Y")         if not df.empty         else "n/a"
+_m_last  = metal_df["Date"].max().strftime("%b %d, %Y")   if not metal_df.empty   else "n/a"
+_e_last  = energy_df["Date"].max().strftime("%b %d, %Y")  if not energy_df.empty  else "n/a"
+_s_last  = softs_df["Date"].max().strftime("%b %d, %Y")   if not softs_df.empty   else "n/a"
+_y_live  = "✅ live" if not live_yields.empty else "⚠️ file only"
+_m_live  = "✅ live" if not live_metals.empty else "⚠️ file only"
+_e_live  = "✅ live" if not live_energy.empty else "⚠️ file only"
+_s_live  = "✅ live" if not live_softs.empty  else "⚠️ file only"
+st.caption(
+    f"Yields **{_y_last}** {_y_live} · "
+    f"Metals **{_m_last}** {_m_live} · "
+    f"Energy **{_e_last}** {_e_live} · "
+    f"Softs **{_s_last}** {_s_live}"
+)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_yield, tab_comm, tab_corr = st.tabs(["📈 Yield Curve", "📦 Commodities & Energy", "🔗 Correlation"])
@@ -499,6 +591,19 @@ with tab_comm:
             st.subheader("Energy")
             ecols = [c for c in energy_df.columns if c != "Date"]
             trend_chart(energy_df, ecols, "Energy prices", comm_days, normalize)
+
+        if not softs_df.empty:
+            st.subheader("Soft Commodities & Livestock")
+            SOFTS_GROUPS = {
+                "Grains":    ["C 1 COMB","S 1","W 1","SM1","BO1","O 1"],
+                "Softs":     ["SB1","KC1","CT1","CC1","JO1"],
+                "Livestock": ["LC1","LH1","FC1"],
+                "Other":     ["KO1","JN1","RS1"],
+            }
+            for grp, cols in SOFTS_GROUPS.items():
+                avail = [c for c in cols if c in softs_df.columns]
+                if avail:
+                    trend_chart(softs_df, avail, grp, comm_days, normalize)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 3 — CROSS-ASSET CORRELATION
